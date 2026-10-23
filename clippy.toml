@@ -1,3 +1,3 @@
 # Protocol names that read as code to clippy::doc_markdown but are prose here.
 # ".." keeps clippy's built-in list.
-doc-valid-idents = ["GWebCache", "GWebCaches", "Gnutella2", "Shareaza", ".."]
+doc-valid-idents = ["GWebCache", "GWebCaches", "Gnutella2", "Shareaza", "WinINet", "CruxP2P", ".."]
