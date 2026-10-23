@@ -1,0 +1,16 @@
+[package]
+name = "gwc-core"
+description = "Pure GWebCache v2 protocol logic, free of any Workers dependency"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

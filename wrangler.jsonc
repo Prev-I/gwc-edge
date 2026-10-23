@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gwc-edge",
+  "main": "crates/gwc-worker/build/index.js",
+  "compatibility_date": "2026-10-20",
+  "build": {
+    // worker-build is pinned and installed by mise (see mise.toml).
+    "command": "cd crates/gwc-worker && worker-build --release"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "gwc-edge",
+      // Omitted on purpose: wrangler provisions the database on first deploy
+      // and local development needs no id. Set it once the database exists.
+      // "database_id": "",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}
