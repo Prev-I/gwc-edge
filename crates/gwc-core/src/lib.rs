@@ -10,10 +10,14 @@
 
 pub mod addr;
 pub mod cache_url;
+pub mod config;
+pub mod counters;
 pub mod handshake;
 pub mod policy;
 pub mod query;
 pub mod response;
+pub mod snapshot;
+pub mod stats;
 
 #[cfg(test)]
 mod shareaza_model;

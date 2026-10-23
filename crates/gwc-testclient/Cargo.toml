@@ -1,0 +1,18 @@
+[package]
+name = "gwc-testclient"
+description = "A GWebCache client that speaks exactly as Shareaza 2.7 does, for integration tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ureq.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

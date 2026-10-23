@@ -1,68 +1,86 @@
 -- Migration number: 0001  initial schema
 --
--- All timestamps are Unix seconds (UTC). Row-write budget on the Free plan is
--- 100,000/day, and every index on a written column doubles a write, so indexes
--- exist only where a read would otherwise scan a whole table.
+-- Amended in place before any remote database existed (no database_id in
+-- wrangler.jsonc). From the first remote apply on, every change is 0002+.
+--
+-- Budget rules (Workers Free + D1 Free: 100k requests, 100k rows written and
+-- 5M rows read per day), see docs/adr/ once written:
+--   * The request path writes nothing unless a read in the same invocation
+--     showed a row will change; the only exception is the sampled counter.
+--   * Gets read one row: the cron-rendered `snapshots.hostfile`. Only if it is
+--     missing or stale does a request scan `hubs` and `caches`, and it then
+--     writes the snapshot back, so the next requests read it again.
+--   * No secondary indexes: every index on a written column doubles a write,
+--     and the scans above are bounded by the caps (500 hubs, 50 caches).
+-- All timestamps are Unix seconds (UTC). Bounds mirror gwc-core's validation,
+-- so a value core accepts can never fail a CHECK; and every integer the Worker
+-- reads back is non-negative, so a value a CHECK accepts can always be decoded.
 
 -- G2 hubs. PRIMARY KEY (ip) is also the "one hub per IP" rule.
 CREATE TABLE hubs (
-  ip            TEXT    PRIMARY KEY,
+  ip            TEXT    NOT NULL PRIMARY KEY CHECK (length(ip) BETWEEN 7 AND 15),
   port          INTEGER NOT NULL CHECK (port BETWEEN 1024 AND 65535),
   status        TEXT    NOT NULL CHECK (status IN ('unverified', 'verified', 'alive_full', 'dead')),
   source        TEXT    NOT NULL CHECK (source IN ('update', 'try_hubs', 'seed')),
-  vendor        TEXT,             -- 4-char code, from client= or the handshake User-Agent
-  version       TEXT,
-  leaves        INTEGER,          -- x.leaves as reported by the hub
-  max_leaves    INTEGER,          -- x.max
-  uptime        INTEGER,          -- uptime, seconds
-  first_seen    INTEGER NOT NULL,
-  last_seen     INTEGER NOT NULL, -- max(last accepted update, last successful verification)
-  last_checked  INTEGER,          -- last handshake attempt, any outcome
-  failures      INTEGER NOT NULL DEFAULT 0
-);
+  vendor        TEXT    CHECK (vendor IS NULL OR length(vendor) = 4),
+  version       TEXT    CHECK (version IS NULL OR length(version) BETWEEN 1 AND 16),
+  leaves        INTEGER CHECK (leaves IS NULL OR leaves BETWEEN 0 AND 65535),
+  max_leaves    INTEGER CHECK (max_leaves IS NULL OR max_leaves BETWEEN 0 AND 65535),
+  up_since      INTEGER CHECK (up_since IS NULL OR up_since >= 0), -- last update time minus reported uptime
+  first_seen    INTEGER NOT NULL CHECK (first_seen >= 0),
+  last_seen     INTEGER NOT NULL CHECK (last_seen >= 0), -- last accepted update or successful verification
+  last_checked  INTEGER CHECK (last_checked IS NULL OR last_checked >= 0), -- last handshake attempt, any outcome
+  failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0)
+) STRICT, WITHOUT ROWID;
 
--- The hostfile query reads newest-first by last_seen; without this index every
--- get would scan the whole table.
-CREATE INDEX hubs_last_seen ON hubs (last_seen);
-
--- Other GWebCaches. Capped at ~50 rows, so scans are cheap and no index is kept.
+-- Other GWebCaches. At most 50 rows.
 CREATE TABLE caches (
-  url            TEXT    PRIMARY KEY,  -- normalised http:// URL
-  host           TEXT    NOT NULL,     -- lowercase host, for the per-domain cap
+  url            TEXT    NOT NULL PRIMARY KEY CHECK (length(url) BETWEEN 12 AND 255),
+  host           TEXT    NOT NULL CHECK (length(host) BETWEEN 1 AND 253), -- for the per-domain cap
   status         TEXT    NOT NULL CHECK (status IN ('pending', 'verified', 'failed')),
-  pong           TEXT,                 -- product string from its i|pong
-  submitted_by   TEXT,                 -- client code of the submitter
-  first_seen     INTEGER NOT NULL,
-  last_verified  INTEGER,
-  last_checked   INTEGER,
-  failures       INTEGER NOT NULL DEFAULT 0
-) WITHOUT ROWID;
+  pong           TEXT    CHECK (pong IS NULL OR length(pong) <= 64),
+  submitted_by   TEXT    CHECK (submitted_by IS NULL OR length(submitted_by) = 4),
+  first_seen     INTEGER NOT NULL CHECK (first_seen >= 0),
+  last_verified  INTEGER CHECK (last_verified IS NULL OR last_verified >= 0),
+  last_checked   INTEGER CHECK (last_checked IS NULL OR last_checked >= 0),
+  failures       INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0)
+) STRICT, WITHOUT ROWID;
 
--- Client/version pairs. last_seen is refreshed at most hourly to save writes.
+-- Client/version pairs, derived hourly by cron from request_log.
 CREATE TABLE clients_seen (
-  client      TEXT    NOT NULL,
-  version     TEXT    NOT NULL,
-  first_seen  INTEGER NOT NULL,
-  last_seen   INTEGER NOT NULL,
+  client      TEXT    NOT NULL CHECK (length(client) BETWEEN 1 AND 4),
+  version     TEXT    NOT NULL CHECK (length(version) BETWEEN 1 AND 16),
+  first_seen  INTEGER NOT NULL CHECK (first_seen >= 0),
+  last_seen   INTEGER NOT NULL CHECK (last_seen >= 0),
   PRIMARY KEY (client, version)
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 
--- Hourly counters: one UPSERT (n = n + 1) per request, never a row per request.
+-- Hourly request counters, sampled: one request in 8 adds 8
+-- (gwc_core::counters). `kind` is the closed set gwc_core::counters::Kind.
 CREATE TABLE request_log (
-  hour     INTEGER NOT NULL,  -- unix seconds / 3600
-  kind     TEXT    NOT NULL,  -- request kind, e.g. get_hosts, update_ip, rate_limited
-  client   TEXT    NOT NULL,
-  version  TEXT    NOT NULL,
+  hour     INTEGER NOT NULL CHECK (hour >= 0), -- unix seconds / 3600
+  kind     TEXT    NOT NULL CHECK (kind IN ('ping', 'hostfile', 'urlfile', 'update', 'other_net', 'limited', 'denied', 'error')),
+  client   TEXT    NOT NULL CHECK (length(client) BETWEEN 1 AND 4),  -- '-' when absent
+  version  TEXT    NOT NULL CHECK (length(version) BETWEEN 1 AND 16), -- '-' when absent
   scheme   TEXT    NOT NULL CHECK (scheme IN ('http', 'https')),
-  n        INTEGER NOT NULL DEFAULT 0,
+  n        INTEGER NOT NULL DEFAULT 0 CHECK (n >= 0),
   PRIMARY KEY (hour, kind, client, version, scheme)
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 
--- Per-source-IP rate limiting. One atomic statement checks and records:
--- INSERT ... ON CONFLICT DO UPDATE ... WHERE now - last_at >= window RETURNING.
-CREATE TABLE rate_limits (
-  ip       TEXT    NOT NULL,
-  action   TEXT    NOT NULL CHECK (action IN ('get', 'update')),
-  last_at  INTEGER NOT NULL,
-  PRIMARY KEY (ip, action)
-) WITHOUT ROWID;
+-- Row counts for the caps, so a cap check reads one row instead of scanning.
+-- Incremented in the same batch as each insert; reconciled by cron.
+CREATE TABLE counts (
+  k  TEXT    NOT NULL PRIMARY KEY CHECK (k IN ('hubs', 'hubs_unverified', 'caches')),
+  n  INTEGER NOT NULL DEFAULT 0 CHECK (n >= 0)
+) STRICT, WITHOUT ROWID;
+
+INSERT INTO counts (k, n) VALUES ('hubs', 0), ('hubs_unverified', 0), ('caches', 0);
+
+-- Documents rendered by cron; the request path reads one row.
+--   hostfile: gwc_core::snapshot::Snapshot, every cron run
+--   stats:    gwc_core::stats::Stats as JSON, hourly
+CREATE TABLE snapshots (
+  k            TEXT    NOT NULL PRIMARY KEY CHECK (k IN ('hostfile', 'stats')),
+  rendered_at  INTEGER NOT NULL CHECK (rendered_at >= 0),
+  body         TEXT    NOT NULL
+) STRICT, WITHOUT ROWID;
