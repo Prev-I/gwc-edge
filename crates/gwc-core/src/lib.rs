@@ -2,6 +2,21 @@
 //! validation, handshake parsing and expiry math.
 //!
 //! Nothing here depends on the Workers runtime, so all of it is tested natively.
+//!
+//! Shareaza is the compatibility oracle. Citations of the form
+//! `DiscoveryServices.cpp:N` (or a bare `:N` inside a module that names the
+//! file) refer to <https://github.com/ansani/Shareaza> at commit
+//! `f24b0ce3753067e02fb6ee7dbf82d8c214c291d2`, under `shareaza/`.
+
+pub mod addr;
+pub mod cache_url;
+pub mod handshake;
+pub mod policy;
+pub mod query;
+pub mod response;
+
+#[cfg(test)]
+mod shareaza_model;
 
 /// Product name advertised in `i|pong` and on `/healthz`.
 pub const PRODUCT: &str = "gwc-edge";
