@@ -1,0 +1,16 @@
+# This repository's integration policy.
+#
+# Work goes through a pull request into main.
+#
+# Declared rather than inherited from the branch name -- main carries no
+# integration semantics on its own.
+#
+# Format: https://github.com/Prev-I/agentic-dev-toolkit/tree/main/repository-policy
+version: 1
+
+branching:
+  workflow: github-flow
+  stableBranch: main
+
+integration:
+  mode: pull-request
