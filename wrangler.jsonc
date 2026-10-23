@@ -1,11 +1,12 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "gwc-edge",
   "main": "crates/gwc-worker/build/index.js",
   "compatibility_date": "2026-10-20",
   "build": {
     // worker-build is pinned and installed by mise (see mise.toml).
-    "command": "cd crates/gwc-worker && worker-build --release"
+    "command": "cd crates/gwc-worker && worker-build --release",
+    // wrangler watches ./src by default, which does not exist here.
+    "watch_dir": ["crates/gwc-core/src", "crates/gwc-worker/src"]
   },
   "d1_databases": [
     {

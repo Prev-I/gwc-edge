@@ -3,5 +3,6 @@ Thumbs.db
 /target
 /crates/gwc-worker/build
 /.wrangler
+/dist
 /node_modules
 .dev.vars

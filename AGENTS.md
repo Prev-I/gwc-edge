@@ -8,7 +8,7 @@ Instructions for all AI coding agents (Claude Code, Codex, OpenCode).
 (Free plan), storing state in Cloudflare D1. Shareaza 2.7.x is the
 compatibility oracle: where the written GWC spec and Shareaza's parser
 disagree, Shareaza wins, and the deviation is recorded in `docs/protocol.md`
-with a citation into Shareaza's `DiscoveryServices.cpp`.
+(written in phase 2) with a citation into Shareaza's `DiscoveryServices.cpp`.
 
 ```
 crates/gwc-core/    pure protocol logic, no `worker` dependency, >= 90% line coverage
@@ -17,13 +17,16 @@ migrations/         D1 migrations, applied in order by wrangler
 scripts/smoke.sh    wrangler dev + local D1 + /healthz check (also run in CI)
 wrangler.jsonc      Worker config; build runs worker-build
 mise.toml           every tool, pinned; CI installs from the same file
+mise.lock           checksums and URLs for the tools mise downloads; `mise lock` refreshes it
+.mise/locks/        wrangler's npm dependency lock, referenced from mise.lock by digest
 ```
 
 ## Commands
 
 Tools come only from `mise.toml` (`mise install`). Never install Rust tooling
-another way, and pick stable releases; the one nightly is `FUZZ_TOOLCHAIN`,
-used only by `cargo fuzz`.
+another way, and pick stable releases. After changing `mise.toml`, run
+`mise lock` and commit both `mise.lock` and `.mise/locks/`, deleting version
+directories under `.mise/locks/` that `mise.lock` no longer references.
 
 ```bash
 cargo fmt --all -- --check
@@ -32,12 +35,13 @@ cargo clippy -p gwc-worker --target wasm32-unknown-unknown -- -D warnings
 cargo deny check
 cargo test --workspace
 cargo llvm-cov -p gwc-core --summary-only --fail-under-lines 90
-wrangler build                       # wasm into crates/gwc-worker/build/
+wrangler deploy --dry-run --outdir target/wrangler-dist   # build + bundle, no upload
 wrangler d1 migrations apply DB --local
 scripts/smoke.sh                     # SMOKE_PORT overrides the default 18787
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of the above on every pull request.
+CI (`.github/workflows/ci.yml`) runs all of the above on every pull request and
+every push to `main`.
 
 ## Rules that are not obvious from the code
 
@@ -48,8 +52,9 @@ CI (`.github/workflows/ci.yml`) runs all of the above on every pull request.
   wasm-bindgen needs and the build fails with "externref table required for
   catch wrappers".
 - **Count D1 row writes.** The Free plan allows 100,000 rows written per day and
-  fails queries beyond it. Every index on a written column doubles that write.
-  Counters are hourly aggregates updated in place, never a row per request.
+  fails every query beyond it until 00:00 UTC. Each row a statement changes is
+  one written row, an in-place `UPDATE` included, and each index on a changed
+  column adds one more. Aggregating counters by hour bounds storage, not writes.
 - **Stay inside one invocation's budget:** 10 ms CPU, 50 D1 queries, 50 external
   subrequests, 6 simultaneous connections (TCP sockets included).
 - **Pin exact versions** (`=x.y.z`) in `[workspace.dependencies]`, and pin

@@ -9,21 +9,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull requests share a group per branch and cancel superseded runs. Pushes
+  # get a group per commit: a shared group keeps only one pending run and would
+  # silently drop the commits queued in between.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   WRANGLER_SEND_METRICS: "false"
+  # mise itself is pinned too: it decides how every other tool resolves.
+  MISE_VERSION: "2026.9.7"
 
 jobs:
   check:
     name: fmt, clippy, deny, test, coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Installs every tool at the version pinned in mise.toml, and caches them.
+        with:
+          persist-credentials: false
+      # Installs every tool at the version pinned in mise.toml / mise.lock.
       - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: rust cargo-deny cargo:cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: rustfmt
@@ -37,24 +48,38 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: coverage (gwc-core, >= 90% lines)
+        shell: bash
+        # The summary is written whether or not the gate passes; the gate's
+        # exit status is what the step returns.
         run: |
-          cargo llvm-cov -p gwc-core --summary-only --fail-under-lines 90 | tee coverage.txt
+          set +e
+          # stdout (the table) goes to the file; build noise streams to the log.
+          cargo llvm-cov -p gwc-core --summary-only --fail-under-lines 90 --color never | tee coverage.txt
+          rc=${PIPESTATUS[0]}
+          set -e
           {
             echo '## gwc-core coverage'
             echo '```'
             cat coverage.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
   wasm:
     name: build wasm, smoke test under wrangler dev
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: rust node npm:wrangler cargo:worker-build
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: build
-        run: wrangler build
+      - name: build (bundle into target/, as a deploy would)
+        run: wrangler deploy --dry-run --outdir target/wrangler-dist
       - name: smoke test (/healthz with local D1)
         run: scripts/smoke.sh

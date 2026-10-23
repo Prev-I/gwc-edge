@@ -2,7 +2,7 @@
 //! Protocol decisions live in `gwc_core`.
 
 use serde::Serialize;
-use worker::{Context, Env, Request, Response, Result, event};
+use worker::{Context, Env, Request, Response, Result, console_error, event};
 
 /// D1 binding name, as declared in `wrangler.jsonc`.
 const DB: &str = "DB";
@@ -34,9 +34,15 @@ async fn healthz(env: &Env) -> Result<Response> {
     let database = match env.d1(DB) {
         Ok(db) => match db.prepare("SELECT 1").run().await {
             Ok(_) => "ok",
-            Err(_) => "error",
+            Err(e) => {
+                console_error!("healthz: D1 query failed: {e}");
+                "error"
+            }
         },
-        Err(_) => "unbound",
+        Err(e) => {
+            console_error!("healthz: D1 binding {DB} unavailable: {e}");
+            "unbound"
+        }
     };
     let health = Health {
         status: if database == "ok" { "ok" } else { "degraded" },
