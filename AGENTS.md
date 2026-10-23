@@ -1,4 +1,4 @@
-# rs-gcache
+# rs-gwc-edge
 
 Instructions for all AI coding agents (Claude Code, Codex, OpenCode).
 
