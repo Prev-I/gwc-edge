@@ -1,2 +1,5 @@
 *.yaml text eol=lf
 *.yml text eol=lf
+*.sh text eol=lf
+# Generated lock files are hashed byte for byte; never rewrite line endings.
+.mise/locks/** -text
