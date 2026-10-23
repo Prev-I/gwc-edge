@@ -1,0 +1,18 @@
+# Every tool this repository needs, pinned. CI installs from this same file
+# (jdx/mise-action), so local and CI builds use identical versions.
+
+[tools]
+# Stable toolchain for everything except fuzzing. The wasm target is what
+# Cloudflare Workers run; llvm-tools is needed by cargo-llvm-cov.
+rust = { version = "1.99.1", components = "rustfmt,clippy,llvm-tools", targets = "wasm32-unknown-unknown" }
+node = "24"
+"npm:wrangler" = "4.152.0"
+"cargo:worker-build" = "0.8.7"
+cargo-deny = "0.20.2"
+"cargo:cargo-llvm-cov" = "0.9.1"
+"cargo:cargo-fuzz" = "0.13.2"
+
+[env]
+# cargo-fuzz requires nightly; it is the only consumer of this toolchain.
+# Run fuzzers with `cargo +$FUZZ_TOOLCHAIN fuzz ...` (see AGENTS.md).
+FUZZ_TOOLCHAIN = "nightly-2026-10-20"

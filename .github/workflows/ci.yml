@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  WRANGLER_SEND_METRICS: "false"
+
+jobs:
+  check:
+    name: fmt, clippy, deny, test, coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Installs every tool at the version pinned in mise.toml, and caches them.
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (native)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy (wasm32)
+        run: cargo clippy -p gwc-worker --target wasm32-unknown-unknown -- -D warnings
+      - name: cargo deny
+        run: cargo deny check
+      - name: test
+        run: cargo test --workspace
+      - name: coverage (gwc-core, >= 90% lines)
+        run: |
+          cargo llvm-cov -p gwc-core --summary-only --fail-under-lines 90 | tee coverage.txt
+          {
+            echo '## gwc-core coverage'
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  wasm:
+    name: build wasm, smoke test under wrangler dev
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: build
+        run: wrangler build
+      - name: smoke test (/healthz with local D1)
+        run: scripts/smoke.sh

@@ -1,0 +1,22 @@
+[package]
+name = "gwc-worker"
+description = "Cloudflare Workers adapter for gwc-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gwc-core.workspace = true
+worker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+console_error_panic_hook.workspace = true
+
+[lints]
+workspace = true
