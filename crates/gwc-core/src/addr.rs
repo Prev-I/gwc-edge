@@ -184,6 +184,13 @@ mod tests {
     }
 
     #[test]
+    fn migration_port_check_matches_min_port() {
+        // A port core accepts must never fail the CHECK on insert.
+        let sql = include_str!("../../../migrations/0001_initial.sql");
+        assert!(sql.contains(&format!("CHECK (port BETWEEN {MIN_PORT} AND 65535)")));
+    }
+
+    #[test]
     fn source_must_equal_claimed_ip() {
         let claimed = Ipv4Addr::new(8, 8, 4, 4);
         assert!(source_matches("8.8.4.4", claimed));

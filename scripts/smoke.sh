@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Start the Worker under `wrangler dev` with a local D1, apply migrations, and
-# check that /healthz answers 200 with a working database.
+# Start the Worker under `wrangler dev` with a fresh, isolated local D1, apply
+# migrations, and check that /healthz answers 200 with a working database.
 #
 # Usage: scripts/smoke.sh            (run from anywhere; needs mise tools on PATH)
 # Env:   SMOKE_PORT  port for wrangler dev (default 18787: 8787, wrangler's own
@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 port="${SMOKE_PORT:-18787}"
 url="http://127.0.0.1:$port/healthz"
 log="$(mktemp)"
+state="$(mktemp -d)"   # isolated D1 state: never touches .wrangler/state
 # Every probe is bounded, so a server that accepts and then stalls cannot hang
 # the script (or a CI job) indefinitely.
 curl_opts=(--silent --connect-timeout 2 --max-time 5)
@@ -22,11 +23,12 @@ if curl "${curl_opts[@]}" -o /dev/null "http://127.0.0.1:$port/"; then
   exit 1
 fi
 
-wrangler d1 migrations apply DB --local >/dev/null
+trap 'rm -rf "$log" "$state"' EXIT
+wrangler d1 migrations apply DB --local --persist-to "$state" >/dev/null
 
-wrangler dev --port "$port" --ip 127.0.0.1 >"$log" 2>&1 &
+wrangler dev --port "$port" --ip 127.0.0.1 --persist-to "$state" >"$log" 2>&1 &
 pid=$!
-trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f "$log"' EXIT
+trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$log" "$state"' EXIT
 
 fail() {
   echo "smoke: $1" >&2

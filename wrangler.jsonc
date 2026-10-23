@@ -18,5 +18,18 @@
       "migrations_dir": "migrations"
     }
   ],
+  "vars": {
+    // This cache's public URL, exactly as clients store it: plain http://,
+    // the custom domain, no alias. Replace before deploying.
+    "SELF_URL": "http://gwc.example.org/",
+    "HOSTFILE_COUNT": "20",
+    "URLFILE_COUNT": "20",
+    // Comma-separated vendor codes that get no hosts. CRUX is CruxP2P.
+    "CLIENT_DENYLIST": "CRUX"
+  },
+  "triggers": {
+    // Renders the hostfile snapshot (and hourly stats); verification joins later.
+    "crons": ["*/10 * * * *"]
+  },
   "observability": { "enabled": true }
 }
