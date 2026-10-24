@@ -195,7 +195,7 @@ await_health "$degraded_base" 503 "$degraded_pid"
 
 # One test thread: the log test counts lines, and the edge-cache tests rely
 # on request order.
-GWC_BASE_URL="$base" GWC_CANONICAL_URL="$self_url" GWC_SEED_AT="$now" \
+GWC_BASE_URL="$base" GWC_CANONICAL_URL="$self_url" GWC_SEED_AT="$now" GWC_STATE_DIR="$state" \
 GWC_DEGRADED_URL="$degraded_base" GWC_LOG_FILE="$log" GWC_DEGRADED_LOG_FILE="$degraded_log" \
   cargo test -p gwc-testclient --tests -- --ignored --test-threads=1 \
   || fail "integration tests failed"
