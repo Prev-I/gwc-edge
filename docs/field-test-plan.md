@@ -1,0 +1,246 @@
+# Field test plan
+
+How to prove that a deployed `gwc-edge` works for real Shareaza clients and
+hubs, and how to bring it into the G2 network. This is a plan: nothing here
+has been run against production yet.
+
+Each stage has:
+- what to do;
+- what to watch;
+- what counts as passing.
+
+Record the results in the table at the end. Stop at the first stage that
+fails, and use `docs/operations.md` to find out why.
+
+## Before you start
+
+- [ ] **The cache is deployed** (README, "Deploying"), and
+  `scripts/smoke.sh --prod <canonical URL>` passes.
+- [ ] **`/healthz`** shows `"status":"ok"`, `"cron":"ok"` and
+  `"test_dial":false`.
+- [ ] **The `prod-smoke` workflow** is green, if you deploy from GitHub.
+- [ ] **Workers Logs are open:** Workers & Pages → gwc-edge → Observability.
+  Also open the `/stats` page.
+- [ ] **A Windows machine or VM with Shareaza 2.7.10.x.** For stage 3 you also
+  need:
+  - a public IPv4 address, not behind carrier-grade NAT;
+  - one TCP port forwarded to it (Shareaza's default is 6346).
+- [ ] **A backup of Shareaza's `Discovery.dat`** (in Shareaza's data folder),
+  so you can restore the client's own cache list afterwards.
+
+Throughout, `http://gwc.example.org/` stands for your canonical URL.
+
+## Stage 1: seed the cache
+
+A new cache knows no hubs. Seed it once from `dkac`, the one other G2 cache
+known to be alive, then let the cron verify what came in:
+
+```bash
+GWC_CANONICAL_URL=http://gwc.example.org/ scripts/seed.sh fetch seed.sql
+less seed.sql                       # review: one INSERT per hub and cache
+scripts/seed.sh apply seed.sql      # stores exactly that file
+```
+
+The script:
+- **Asks `dkac` once each** for its G2 hostfile and urlfile, in `fetch`.
+  `fetch` fails and writes nothing if `dkac` offers no hub. An error page or
+  a refusal therefore cannot pass for a seed.
+- **Keeps what this cache's own rules accept:**
+  - public IPv4 hubs on port 1024 or above, at most 100;
+  - canonical `http://` caches, at most 3 per host, never this cache; `dkac`
+    itself is one of them.
+- **Stores them for verification only.** Hubs go in as `unverified` (source
+  `seed`) and caches as `pending`. Nothing is served before the cron has
+  checked it.
+  - Seeds share the cron's queue with new registrations. A full seed of 100
+    hubs takes about an hour of runs, during which a hub registering itself
+    may wait longer than usual.
+  - `apply` stores the file with a D1 query, not an import, so the running
+    cache is not interrupted. If `apply` reports an error, nothing was
+    stored: fix the cause and run it again on the same file.
+
+A read-only dry run on 2026-10-24 found 11 hubs and 20 caches.
+
+**Watch**, over the next three cron runs (30 minutes):
+- the `cron` log line: `picked` near 11 at first, then `verified`,
+  `alive_full` and `dead`;
+- one `cron_hub` line per hub, with `class: "new"`;
+- one `cron_cache` line per cache pinged, 2 a run;
+- on `/stats`, `hubs.served`.
+
+**Passing:**
+- at least one seeded hub is `verified` or `alive_full`;
+- a G2 hostfile get lists it:
+
+  ```bash
+  curl -s -A 'Shareaza 2.7.10.6' -H 'Accept:' -H 'Accept-Encoding:' \
+    'http://gwc.example.org/?get=1&hostfile=1&net=gnutella2&ping=1&client=RAZA2.7.10.6'
+  ```
+
+- the `cron` line shows `verification_failed: false`, `subrequests` at most
+  45, and `leaked_sockets: 0`.
+
+## Stage 2: Shareaza as a leaf
+
+This checks that a client which knows only this cache can bootstrap from it.
+
+The windows named below are those of Shareaza 2.7's Advanced mode; menu
+names may differ slightly between builds.
+
+1. **Close Shareaza.** Back up `Discovery.dat` if you have not yet.
+2. **Start Shareaza with G2 only:** turn off Gnutella, eDonkey and the
+   others in the network settings.
+3. **Make this cache the only one.** Open the Discovery window (View →
+   Discovery) and remove the other GWebCaches. Remove the UDP host caches
+   too (UKHL entries), which also hand out hubs.
+4. **Add this cache.** Use Add, choose the GWebCache type and enter the
+   canonical URL exactly.
+   - Shareaza's Add sets no network: it flags the cache for G1 and G2 alike
+     (`docs/protocol.md`, "Failures and removal").
+   - With G1 off since step 2, only G2 queries are sent.
+5. **Empty the host cache** (View → Host Cache, then clear it), so that
+   Shareaza has to ask a cache for hubs.
+6. **Check the list again.** Just before connecting, make sure the Discovery
+   window still lists only this cache. Shareaza may restore its default
+   services when its list gets short.
+7. **Connect.**
+
+**Watch:**
+- **Workers Logs:** within a minute, a `hostfile` line, then a `urlfile`
+  line right after it. Shareaza sends the urlfile query only while it knows
+  fewer than 10 caches. Both lines should have `client: "RAZA"`, the
+  Shareaza version, `outcome: "ok"`, and for the hostfile `hosts_sent`
+  above 0.
+- **Shareaza's Discovery window:** this cache's access count goes up, and its
+  failure count stays at 0. Two failures in a row remove a cache from
+  Shareaza's list, entirely.
+- **Shareaza's System window** (View → System): it reports the cache's reply
+  and then connects to the hubs it listed.
+
+**Passing:**
+- **A hub from this cache.** Shareaza connects to at least one G2 hub, and
+  that hub's address is among those in this cache's hostfile reply. Run the
+  `curl` from stage 1 and compare.
+- **No failure** for this cache in the Discovery window after two queries.
+  Shareaza waits at least 30 minutes between queries to the same cache, so
+  check again after half an hour.
+
+**If it fails:**
+- the access count rises, but so does the failure count;
+- no log line appears at all.
+
+Run `scripts/smoke.sh --prod`. It names a redirect, a challenge, compression
+or a missing reason phrase. Then check the zone settings (README, ADR-0014).
+
+## Stage 3: Shareaza as a hub
+
+This checks the write path and the verifying cron with a real hub: the
+project's definition of done, outside the test suite.
+
+1. **Make Shareaza a hub.** In the G2 settings, set it to hub mode, with the
+   forwarded port as its listening port.
+2. **Keep this cache among its working caches.** Shareaza sends updates only
+   to caches it has used successfully, with at least one access and no
+   failures (`docs/protocol.md`, "When Shareaza talks to a cache").
+   - Stage 2's urlfile reply also taught Shareaza the caches this one lists,
+     and any of them that works can receive the update instead.
+   - The first update may therefore go elsewhere for a few hours. Removing
+     the other caches from the Discovery window again shortens that.
+3. **Leave it running.** Shareaza registers a hub only once it has been a
+   stable hub for 2 hours with at least 4 neighbours, and then at most once
+   an hour (`docs/protocol.md`, "When Shareaza talks to a cache").
+
+**Watch:**
+- **The update:** an `update` log line with `ip:inserted`. A
+  `url:inserted`/`url:known` part appears too if Shareaza submitted a cache.
+  If you see `ip:source_mismatch`, the address Shareaza reports is not the
+  one it connects from (NAT, or IPv6), so the cache stores nothing.
+- **The check, within 10 to 20 minutes:** a `cron_hub` line with `class: "new"`,
+  `result: "200"` (or `"503"` when the hub is full) and `now: "verified"`
+  (or `"alive_full"`).
+- **The listing:** a hostfile get now lists the hub. On `/stats`,
+  `hubs.verified` (or `alive_full`) went up by one.
+
+**Passing:**
+- the hub is listed within 20 minutes of its first update, or within about
+  an hour if a full seed was applied just before;
+- it stays listed while it keeps running. It is re-checked every 90
+  minutes, and its updates refresh it hourly.
+
+**If it fails:**
+- a `cron_hub` line with `result: "timeout"` or `"unreachable"` means the
+  port is not reachable from the internet: check the forwarding;
+- `503` with `Shielded leaf node` or `Need an Ultrapeer` means Shareaza was
+  not in hub mode;
+- `GWC_TRACE=1` (a Worker variable, set briefly) logs each reply's headers.
+
+## Stage 4: announce the cache
+
+Ask `dkac` to list this cache:
+
+```bash
+curl -s -G -A 'gwc-edge' 'http://dkac.trillinux.org/dkac/dkac.php' \
+  --data 'update=1&net=gnutella2&client=TEST' \
+  --data-urlencode 'version=gwc-edge (announce)' \
+  --data-urlencode 'url=http://gwc.example.org/'
+```
+
+**Do this once.** Caches limit how often one address may update them. If
+the reply is not an `OK`, wait an hour before trying again.
+
+**Watch:**
+- **dkac's verification ping:** soon afterwards, a `ping` request line in
+  this cache's logs whose `client` is not `RAZA`. The logs never carry the
+  requester's address, so the client code is how dkac's request shows.
+- **dkac's listing:** later, this cache in dkac's urlfile:
+
+  ```bash
+  curl -s 'http://dkac.trillinux.org/dkac/dkac.php?get=1&urlfile=1&net=gnutella2&client=TEST&version=gwc-edge'
+  ```
+
+**Passing:** dkac lists the canonical URL. From then on, Shareaza clients
+that use dkac learn this cache too, and `hostfile` and `urlfile` requests
+from other addresses start to appear in the logs.
+
+## Stage 5: a week in the network
+
+Leave the cache running for a week. Then look at the following:
+
+| What | Where | Healthy |
+|---|---|---|
+| Uptime as Shareaza sees it | `prod-smoke` workflow, `/healthz` | green every day; `status: ok`, `cron: ok` |
+| Hubs listed | `/stats` `hubs.served` | close to the G2 network's hub count (about 35, http://crawler.doxu.org/) |
+| `dead` rows | `/stats` `hubs.dead` | stable or slowly varying; not climbing towards 1,000 |
+| Requests | `/stats` `requests` | mostly `RAZA` hostfile and urlfile gets; `limited` and `denied` small |
+| D1 health | `/stats` `health` | `d1_errors_24h` and `degraded_responses_24h` at 0 |
+| D1 budget | Cloudflare dashboard → D1 → gwc-edge → Metrics | rows written well under 100,000 a day (expected about 5,000); rows read under 5 million |
+| Cron cost | `cron` log lines | `ms` under 60,000; `subrequests` under 45, which also settles whether sockets count as subrequests; `leaked_sockets` 0; `skipped_budget` 0 |
+| CPU | Workers & Pages → gwc-edge → Metrics | CPU time per invocation well under 10 ms, cron included |
+| Logs | Workers Logs | no `cron_failed`, `internal_error` or unexpected `d1_error` lines |
+
+**Passing:**
+- every row above is healthy for the whole week;
+- the `prod-smoke` workflow opened no issue.
+
+Then propose the cache for Shareaza's default list (README, "Getting
+listed"): one line, `2 http://gwc.example.org/`, in `Data/DefaultServices.dat`
+of `ansani/Shareaza`.
+
+## Afterwards
+
+**Restore Shareaza's own cache list** (the backed-up `Discovery.dat`) on the
+test machine, so that it does not keep relying on one cache.
+
+**Do not take a cache down casually.** Clients that know it drop it after
+two failed requests, and they do not add it back on their own. To pause it,
+keep it answering: a deploy that serves no hubs still keeps its place.
+
+## Results
+
+| Stage | Date | Result | Notes (counts, anomalies, links to logs) |
+|---|---|---|---|
+| 1. Seed | | | |
+| 2. Leaf | | | |
+| 3. Hub | | | |
+| 4. Announce | | | |
+| 5. One week | | | |

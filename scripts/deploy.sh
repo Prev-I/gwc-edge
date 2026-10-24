@@ -25,10 +25,11 @@ case "$#:${1:-}" in
 esac
 
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib.sh
+. scripts/lib.sh
 canonical="${GWC_CANONICAL_URL:?set GWC_CANONICAL_URL to the public http:// URL of the cache}"
 out="wrangler.deploy.json"
-name="$(grep -o '"database_name": "[^"]*"' wrangler.jsonc | head -1 | cut -d'"' -f4 || true)"
-[ -n "$name" ] || { echo "deploy: no database_name in wrangler.jsonc" >&2; exit 1; }
+name="$(d1_name)"
 
 # Never reuse an earlier render (a dry run's placeholder id, say).
 render() {
@@ -46,14 +47,7 @@ if ((dry_run)); then
 fi
 
 # 1. The database, by name: created on the first deploy only.
-database_id() {
-  wrangler d1 list --json | node -e '
-    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-      const db = JSON.parse(s).find((d) => d.name === process.argv[1]);
-      if (db) process.stdout.write(db.uuid);
-    });' "$name"
-}
-id="$(database_id)"
+id="$(d1_id "$name")"
 if [ -z "$id" ]; then
   echo "deploy: creating D1 database $name"
   # wrangler may offer to write the new id into wrangler.jsonc, which must
@@ -62,7 +56,7 @@ if [ -z "$id" ]; then
   cp wrangler.jsonc "$template"
   trap 'cmp -s "$template" wrangler.jsonc || cp "$template" wrangler.jsonc; rm -f "$template"' EXIT
   wrangler d1 create "$name" >/dev/null </dev/null
-  id="$(database_id)"
+  id="$(d1_id "$name")"
 fi
 [ -n "$id" ] || { echo "deploy: no D1 database $name" >&2; exit 1; }
 render "$id"

@@ -21,10 +21,12 @@ docs/protocol.md    the protocol authority: GWC v2 as Shareaza speaks it, with c
 docs/adr/           one record per decision; change a decision with a new record
 docs/spec/          verbatim copies of the published GWC specs (GNU FDL), never edited; README.md is ours
 docs/operations.md  logs, /stats, /healthz, and the expected failure modes
+docs/field-test-plan.md  how to prove the deployed cache with real Shareaza clients and hubs
 scripts/smoke.sh    wrangler dev + local D1 + /healthz and --prod checks (also run in CI);
                     `--prod <url>` checks a deployed cache as Shareaza sees it
 scripts/deploy.sh   render wrangler.deploy.json, migrate, deploy, smoke --prod (ADR-0015)
 scripts/fuzz.sh     cargo fuzz on the dated nightly; fuzz/ is its own workspace
+scripts/seed.sh     one-shot seeding from another cache (dkac) via the gwc_seed tool
 scripts/integration.sh  wrangler dev + isolated seeded D1 + cron run + gwc-testclient tests
 wrangler.jsonc      Worker config; build runs worker-build
 wrangler.no-d1.jsonc  tests only: the Worker without D1, for degraded-mode tests

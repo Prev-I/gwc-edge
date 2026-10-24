@@ -499,13 +499,15 @@ pub async fn refresh_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<
 
 /// A `dead` hub registering again after its backoff: the claim's port and
 /// fields and `last_seen = now`, which queues it for the cron's next check.
-/// Status and failures stay: only a handshake revives it (ADR-0012). Writes
-/// 1 row.
+/// Status and failures stay: only a handshake revives it (ADR-0012). The
+/// source becomes `update` (ADR-0016): the row now stands for a
+/// registration, so a failed check keeps its address out of the logs.
+/// Writes 1 row.
 pub async fn reregister_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<()> {
     let ip = claim.addr.ip().to_string();
     db.prepare(
-        "UPDATE hubs SET port = ?2, vendor = ?3, version = ?4, leaves = ?5, max_leaves = ?6, \
-         up_since = ?7, last_seen = ?8 WHERE ip = ?1 AND status = 'dead'",
+        "UPDATE hubs SET port = ?2, source = 'update', vendor = ?3, version = ?4, leaves = ?5, \
+         max_leaves = ?6, up_since = ?7, last_seen = ?8 WHERE ip = ?1 AND status = 'dead'",
     )
     .bind(&hub_values(&ip, claim, now))?
     .run()
@@ -587,24 +589,10 @@ pub async fn insert_cache(
 /// not `dead` (ADR-0012); `hubs_unverified` counts only `X-Try-Hubs`
 /// candidates: the 150 cap is theirs (ADR-0011).
 pub fn reconcile_counts(db: &D1Database) -> Vec<D1PreparedStatement> {
-    [
-        (
-            "hubs_live",
-            "SELECT COUNT(*) AS c FROM hubs WHERE status <> 'dead'",
-        ),
-        (
-            "hubs_unverified",
-            "SELECT COUNT(*) AS c FROM hubs WHERE status = 'unverified' AND source = 'try_hubs'",
-        ),
-        ("caches", "SELECT COUNT(*) AS c FROM caches"),
-    ]
-    .into_iter()
-    .map(|(k, count)| {
-        db.prepare(format!(
-            "UPDATE counts SET n = t.c FROM ({count}) AS t WHERE counts.k = '{k}' AND counts.n <> t.c"
-        ))
-    })
-    .collect()
+    gwc_core::update::reconcile_sql()
+        .iter()
+        .map(|sql| db.prepare(sql))
+        .collect()
 }
 
 // ------------------------------------------------------------- verifying cron
