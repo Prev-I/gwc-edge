@@ -279,6 +279,7 @@ dependencies = [
 name = "gwc-testclient"
 version = "0.1.0"
 dependencies = [
+ "gwc-core",
  "serde_json",
  "ureq",
 ]

@@ -13,6 +13,7 @@
 //! | base + 5 | a hub that never answers (the cron times out) |
 //! | base + 6 | a hub that closes in the middle of its header block |
 //! | base + 7 | an HTTP redirect to a real cache (not followed) |
+//! | base + 8 | another GWebCache's hostfile and urlfile, for `gwc_seed` |
 //!
 //! base + 4 is left closed, for a connection that is refused.
 
@@ -25,22 +26,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// private address is never taken.
 const FRESH_CANDIDATE: &str = "4.2.3.1:6346";
 
-/// What a port answers with.
-type Behaviour = fn() -> Vec<u8>;
+/// What a port answers with, given the request's header block.
+type Behaviour = fn(&[u8]) -> Vec<u8>;
 
 fn main() {
     let base: u16 = std::env::args()
         .nth(1)
         .and_then(|p| p.parse().ok())
         .expect("usage: fake_peer <base-port>");
-    let behaviours: [(u16, Behaviour); 7] = [
-        (0, hub_ok),
-        (1, hub_full),
-        (2, leaf),
-        (3, cache),
-        (5, stall),
-        (6, cut_short),
-        (7, redirect),
+    let behaviours: [(u16, Behaviour); 8] = [
+        (0, |_| hub_ok()),
+        (1, |_| hub_full()),
+        (2, |_| leaf()),
+        (3, |_| cache()),
+        (5, |_| stall()),
+        (6, |_| cut_short()),
+        (7, |_| redirect()),
+        (8, other_cache),
     ];
     let mut threads = Vec::new();
     for (offset, reply) in behaviours {
@@ -52,7 +54,7 @@ fn main() {
             }
         }));
     }
-    println!("fake_peer: listening on 127.0.0.1:{base}..{}", base + 7);
+    println!("fake_peer: listening on 127.0.0.1:{base}..{}", base + 8);
     for t in threads {
         let _ = t.join();
     }
@@ -60,7 +62,7 @@ fn main() {
 
 /// Read the request's header block (or give up after 2 s), then reply and
 /// close.
-fn answer(mut stream: TcpStream, reply: fn() -> Vec<u8>) {
+fn answer(mut stream: TcpStream, reply: Behaviour) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut got = Vec::new();
     let mut buf = [0u8; 1024];
@@ -70,7 +72,7 @@ fn answer(mut stream: TcpStream, reply: fn() -> Vec<u8>) {
             Ok(n) => got.extend_from_slice(&buf[..n]),
         }
     }
-    let _ = stream.write_all(&reply());
+    let _ = stream.write_all(&reply(&got));
 }
 
 fn hub_ok() -> Vec<u8> {
@@ -119,6 +121,25 @@ fn redirect() -> Vec<u8> {
       Location: http://dkac.trillinux.org/dkac/dkac.php\r\n\
       \r\n"
         .to_vec()
+}
+
+/// A GWebCache's G2 hostfile or urlfile reply, as `gwc_seed` asks for them:
+/// two hubs and two caches it should take, and entries it must refuse.
+fn other_cache(request: &[u8]) -> Vec<u8> {
+    let request = String::from_utf8_lossy(request);
+    let body = if request.contains("hostfile=1") {
+        "i|pong|fake-cache 1.0|gnutella2\r\n\
+         h|4.3.1.1:6346|60\r\n\
+         h|4.3.2.1:6347|600\r\n\
+         h|10.0.0.1:6346|5\r\n\
+         h|4.3.3.1:80|5\r\n"
+    } else {
+        "u|http://seeded.example.net/gwc/|60\r\n\
+         u|http://seeded.example.net/other/|60\r\n\
+         u|https://tls.example.net/|60\r\n\
+         u|http://gwc.example.org/|0\r\n"
+    };
+    format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}").into_bytes()
 }
 
 fn leaf() -> Vec<u8> {

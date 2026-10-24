@@ -12,7 +12,7 @@
 # Usage: scripts/integration.sh      (needs mise tools on PATH)
 # Env:   GWC_PORT       port for wrangler dev (default 18789); the degraded
 #                       Worker uses the next port
-#        GWC_FAKE_PORT  first of the fake peers' 8 ports (default GWC_PORT + 10)
+#        GWC_FAKE_PORT  first of the fake peers' 9 ports (default GWC_PORT + 10)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -52,7 +52,7 @@ cleanup() {
   for p in "$pid" "$degraded_pid" "$fake_pid"; do
     [ -n "$p" ] && { kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; }
   done
-  rm -rf "$log" "$degraded_log" "$state" "$degraded_state"
+  rm -rf "$log" "$degraded_log" "$state" "$degraded_state" "${seed_state:-}"
 }
 trap cleanup EXIT
 curl_opts=(--silent --connect-timeout 2 --max-time 5)
@@ -72,7 +72,7 @@ for b in "$base" "$degraded_base"; do
     exit 1
   fi
 done
-for p in $(seq "$fake_port" $((fake_port + 7))); do
+for p in $(seq "$fake_port" $((fake_port + 8))); do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     echo "port $p is already in use; set GWC_FAKE_PORT" >&2
     exit 1
@@ -199,4 +199,35 @@ GWC_BASE_URL="$base" GWC_CANONICAL_URL="$self_url" GWC_SEED_AT="$now" \
 GWC_DEGRADED_URL="$degraded_base" GWC_LOG_FILE="$log" GWC_DEGRADED_LOG_FILE="$degraded_log" \
   cargo test -p gwc-testclient --tests -- --ignored --test-threads=1 \
   || fail "integration tests failed"
+
+# The seeding script, end to end, into a fresh local D1 that is already
+# nearly full: 499 live hubs, and 2 caches on the host the fake cache offers
+# (fake_peer, base + 8, offers 2 hubs and 2 caches there, plus entries to
+# refuse). The caps in the SQL let exactly one of each in: the freshest hub,
+# the first cache.
+seed_state="$(mktemp -d)"
+seed_sql="$seed_state/seed.sql"
+wrangler d1 migrations apply DB --local --persist-to "$seed_state" >/dev/null
+wrangler d1 execute DB --local --persist-to "$seed_state" --command "
+  INSERT INTO caches (url, host, status, first_seen) VALUES
+    ('http://seeded.example.net/a/', 'seeded.example.net', 'pending', 1),
+    ('http://seeded.example.net/b/', 'seeded.example.net', 'pending', 1);
+  WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 498)
+  INSERT INTO hubs (ip, port, status, source, first_seen, last_seen)
+    SELECT '5.0.' || (i / 250) || '.' || (i % 250 + 1), 6346, 'verified', 'update', 1, 1 FROM n;" >/dev/null
+GWC_SEED_FROM="http://127.0.0.1:$((fake_port + 8))/gwc/" GWC_CANONICAL_URL="$self_url" \
+  scripts/seed.sh fetch "$seed_sql" >/dev/null || fail "seed.sh fetch failed"
+scripts/seed.sh apply-local "$seed_sql" "$seed_state" >/dev/null || fail "seed.sh apply-local failed"
+seeded="$(wrangler d1 execute DB --local --persist-to "$seed_state" --json --command "
+  SELECT (SELECT group_concat(ip || ':' || port || ':' || status, ' ')
+          FROM (SELECT * FROM hubs WHERE source = 'seed' ORDER BY ip)) AS seeded_hubs,
+         (SELECT group_concat(url, ' ')
+          FROM (SELECT * FROM caches WHERE first_seen > 1 ORDER BY url)) AS seeded_caches,
+         (SELECT group_concat(k || '=' || n, ' ') FROM (SELECT * FROM counts ORDER BY k)) AS counts")"
+for want in \
+  '"seeded_hubs": "4.3.1.1:6346:unverified"' \
+  '"seeded_caches": "http://seeded.example.net/gwc/"' \
+  '"counts": "caches=3 hubs_live=500 hubs_unverified=0"'; do
+  grep -qF "$want" <<<"$seeded" || fail "seed: expected $want in $seeded"
+done
 echo "integration: ok"

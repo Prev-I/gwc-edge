@@ -35,6 +35,34 @@ pub const MAX_CACHES: u64 = 50;
 /// Most cache URLs kept per host.
 pub const MAX_PER_DOMAIN: usize = 3;
 
+/// `UPDATE counts` statements that set each cap counter to its true value,
+/// written only when it differs. `hubs_live` counts rows that are not `dead`
+/// (ADR-0012); `hubs_unverified` only `X-Try-Hubs` candidates (ADR-0011).
+/// Shared by the cron and the seeding tool.
+#[must_use]
+pub fn reconcile_sql() -> [String; 3] {
+    [
+        ("hubs_live", "SELECT COUNT(*) AS c FROM hubs WHERE status <> 'dead'"),
+        (
+            "hubs_unverified",
+            "SELECT COUNT(*) AS c FROM hubs WHERE status = 'unverified' AND source = 'try_hubs'",
+        ),
+        ("caches", "SELECT COUNT(*) AS c FROM caches"),
+    ]
+    .map(|(k, count)| {
+        format!(
+            "UPDATE counts SET n = t.c FROM ({count}) AS t WHERE counts.k = '{k}' AND counts.n <> t.c"
+        )
+    })
+}
+
+/// Whether a normalised cache URL is this cache: same host and port,
+/// whatever the path, since every path there reaches this cache.
+#[must_use]
+pub fn is_self(url: &CacheUrl, canonical: &CacheUrl) -> bool {
+    authority(&url.url).eq_ignore_ascii_case(authority(&canonical.url))
+}
+
 /// A hub as it registers itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubClaim {
@@ -139,9 +167,7 @@ pub fn url_claim(q: &Query, canonical: &CacheUrl) -> Option<Result<CacheUrl, Url
     Some(match cache_url::normalize(raw) {
         // Every path on this cache's host and port reaches this cache: the
         // GWC protocol is answered on `/` and on the canonical path.
-        Ok(u) if authority(&u.url).eq_ignore_ascii_case(authority(&canonical.url)) => {
-            Err(UrlDecline::IsSelf)
-        }
+        Ok(u) if is_self(&u, canonical) => Err(UrlDecline::IsSelf),
         Ok(u) => Ok(u),
         Err(UrlError::Https) => Err(UrlDecline::Https),
         Err(UrlError::Invalid) => Err(UrlDecline::Invalid),

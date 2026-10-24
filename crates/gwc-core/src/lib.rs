@@ -21,6 +21,7 @@ pub mod policy;
 pub mod query;
 pub mod response;
 pub mod route;
+pub mod seed;
 pub mod snapshot;
 pub mod stats;
 pub mod update;

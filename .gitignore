@@ -7,3 +7,5 @@ Thumbs.db
 /node_modules
 .dev.vars
 /wrangler.deploy.json
+/.seed-wrangler-*.json
+/seed.sql

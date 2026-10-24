@@ -473,9 +473,15 @@ by part (`gwc_core::update`, ADR-0010):
 | `ip=` | Gnutella2, a public IPv4 with port 1024..65535, **and the request comes from that address** (`CF-Connecting-IP`) | an `unverified` hub, source `update`, listed after the cron's first successful handshake (ADR-0011) | from any other address: not even as `unverified`; private, reserved or CGNAT addresses; low ports; G1 |
 | `url=` | Gnutella2, a valid `http://` URL (see "Cache URLs" above), not this cache, fewer than 3 already for its host, fewer than 50 in all | a `pending` cache, not served until the cron has pinged it | `https://`, this cache's own URL, invalid URLs, G1 |
 
-- Hubs enter `hubs` with a source other than their own address only as
-  `X-Try-Hubs` candidates found by the verifying cron: source `try_hubs`,
-  status `unverified`, not served until a handshake succeeds.
+- Hubs enter `hubs` from a source other than their own address in only two
+  ways, both `unverified` and not served until a handshake succeeds:
+  - **`X-Try-Hubs` candidates** found by the verifying cron, with source
+    `try_hubs`;
+  - **an operator's one-shot seed** from another cache (`scripts/seed.sh`,
+    `docs/field-test-plan.md`), with source `seed`. Seeds count against the
+    500 cap only, and share the cron's `new` queue with self-registrations.
+    A seeded hub that later registers itself becomes source `update`
+    (ADR-0016).
 - At most 500 live (not `dead`) hubs and 50 caches. Of the hubs, at most 150
   may be `X-Try-Hubs` candidates awaiting a handshake; self-registered hubs
   awaiting one count only against the 500. `dead` hubs are kept outside that

@@ -36,6 +36,7 @@ Documentation:
 | `docs/protocol.md` | The protocol as Shareaza speaks it, with citations, and conformance to the published specifications (`docs/spec/`) |
 | `docs/adr/` | Every design decision, one record each |
 | `docs/operations.md` | Logs, `/stats`, `/healthz`, expected failure modes |
+| `docs/field-test-plan.md` | Seeding, a real Shareaza as leaf and hub, announcing the cache, a week of observation |
 
 ## Deploying
 
@@ -176,8 +177,11 @@ A new cache has no hubs and no clients until others know about it.
   `?update=1&url=<canonical URL>&net=gnutella2&client=…`. Once their own
   verification has pinged this cache, they list it. `dkac`
   (`http://dkac.trillinux.org/dkac/dkac.php`) is the one known to be alive.
-  A field test plan, with a one-shot script to seed this cache from `dkac`,
-  is the next piece of work in this repository.
+  [`docs/field-test-plan.md`](docs/field-test-plan.md) covers this step, and
+  the stages before it:
+  - seeding this cache from `dkac` with `scripts/seed.sh`;
+  - testing it with a real Shareaza, as a leaf and as a hub;
+  - a week of observation.
 - **Shareaza's default list.** Open a pull request against
   [`ansani/Shareaza`](https://github.com/ansani/Shareaza) adding one line to
   `Data/DefaultServices.dat`, in its Gnutella2 block:

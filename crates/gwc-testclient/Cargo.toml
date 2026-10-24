@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+gwc-core.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 

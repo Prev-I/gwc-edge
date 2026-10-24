@@ -20,3 +20,4 @@ changed by a new record that supersedes the old one, never by editing it.
 | [0013](0013-verification-runs-in-the-cron.md) | Hubs and caches are verified by the cron, not inline |
 | [0014](0014-plain-http-on-a-custom-domain.md) | Plain HTTP, on one Custom Domain; the zone settings Shareaza needs |
 | [0015](0015-deployment-and-frozen-migrations.md) | Deployment renders its config; migrations are frozen from v0.1.0 |
+| [0016](0016-operator-seeding.md) | Operator seeding from another cache; a re-registering hub becomes source `update` (amends 0012) |
