@@ -5,9 +5,11 @@
 //! field would make one out-of-range value fail the whole result set, and with
 //! it the cron and the hostfile. A bad row is dropped instead.
 
+use gwc_core::cache_url::CacheUrl;
 use gwc_core::counters::Key;
 use gwc_core::snapshot::{LIST_WINDOW, SnapCache, SnapHub, Snapshot};
 use gwc_core::stats::{ClientCount, MAX_CLIENTS, Totals};
+use gwc_core::update::{HubClaim, HubRow};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use worker::wasm_bindgen::JsValue;
@@ -85,8 +87,13 @@ pub async fn read_snapshot(db: &D1Database, k: &str) -> Result<Option<(u64, Stri
 
 /// Store snapshots in one batch, so readers never see one updated without
 /// the other. Writes 1 row each.
-pub async fn write_snapshots(db: &D1Database, now: u64, docs: &[(&str, &str)]) -> Result<()> {
-    let stmts = docs
+pub async fn write_snapshots(
+    db: &D1Database,
+    now: u64,
+    docs: &[(&str, &str)],
+    extra: Vec<D1PreparedStatement>,
+) -> Result<()> {
+    let mut stmts = docs
         .iter()
         .map(|(k, body)| {
             db.prepare(
@@ -96,6 +103,7 @@ pub async fn write_snapshots(db: &D1Database, now: u64, docs: &[(&str, &str)]) -
             .bind(&[(*k).into(), num(now), (*body).into()])
         })
         .collect::<Result<Vec<_>>>()?;
+    stmts.extend(extra);
     db.batch(stmts).await?;
     Ok(())
 }
@@ -229,7 +237,7 @@ pub async fn snapshot_times(db: &D1Database) -> Result<Vec<(String, u64)>> {
 }
 
 #[derive(Deserialize)]
-struct HubRow {
+struct LiveHubRow {
     ip: String,
     port: f64,
     last_seen: f64,
@@ -239,7 +247,7 @@ struct HubRow {
     max_leaves: Option<f64>,
 }
 
-impl HubRow {
+impl LiveHubRow {
     /// Rows passed core validation on the way in; re-check anyway, so a bad
     /// row is dropped rather than served.
     fn into_snap(self) -> Option<SnapHub> {
@@ -283,7 +291,7 @@ pub async fn live_snapshot(db: &D1Database, now: u64) -> Result<Snapshot> {
         )
         .bind(&[num(now.saturating_sub(LIST_WINDOW))])?,
         "live_hubs",
-        HubRow::into_snap,
+        LiveHubRow::into_snap,
     )
     .await?;
     let caches = rows(
@@ -382,4 +390,190 @@ pub async fn totals(db: &D1Database, first: u64, last: u64) -> Result<Totals> {
             })
         })?,
     })
+}
+
+// ---------------------------------------------------------------- write path
+
+/// The stored row for a hub IP, for `update::plan_hub`. Reads 1 row.
+pub async fn read_hub(db: &D1Database, ip: &str) -> Result<Option<HubRow>> {
+    #[derive(Deserialize)]
+    struct R {
+        port: f64,
+        status: String,
+        source: String,
+        last_seen: f64,
+    }
+    let row: Option<R> = db
+        .prepare("SELECT port, status, source, last_seen FROM hubs WHERE ip = ?1")
+        .bind(&[ip.into()])?
+        .first(None)
+        .await?;
+    Ok(row.and_then(|r| {
+        Some(HubRow {
+            port: int(r.port)?,
+            status: r.status,
+            source: r.source,
+            last_seen: int(r.last_seen)?,
+        })
+    }))
+}
+
+/// One cap counter (`hubs`, `hubs_unverified` or `caches`). Reads 1 row.
+pub async fn read_counter(db: &D1Database, k: &str) -> Result<u64> {
+    #[derive(Deserialize)]
+    struct R {
+        n: f64,
+    }
+    let row: Option<R> = db
+        .prepare("SELECT n FROM counts WHERE k = ?1")
+        .bind(&[k.into()])?
+        .first(None)
+        .await?;
+    Ok(row.and_then(|r| int(r.n)).unwrap_or(0))
+}
+
+/// The cache URLs stored for a host, for `update::plan_cache`. Reads at most
+/// 3 rows through the `caches_host` index.
+pub async fn read_caches_for_host(db: &D1Database, host: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct R {
+        url: String,
+    }
+    rows(
+        db.prepare("SELECT url FROM caches WHERE host = ?1")
+            .bind(&[host.into()])?,
+        "read_caches_for_host",
+        |r: R| Some(r.url),
+    )
+    .await
+}
+
+fn opt_num(n: Option<u64>) -> JsValue {
+    n.map_or(JsValue::NULL, num)
+}
+
+fn opt_str(s: Option<&str>) -> JsValue {
+    s.map_or(JsValue::NULL, JsValue::from)
+}
+
+/// Insert a hub that registered itself, `unverified` until the cron's first
+/// successful handshake (ADR-0011), and count it, in one batch. Writes 2
+/// rows. A concurrent insert of the same IP makes the first statement a no-op;
+/// the cron reconciles `counts` from the table on every run.
+pub async fn insert_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<()> {
+    let ip = claim.addr.ip().to_string();
+    db.batch(vec![
+        db.prepare(
+            "INSERT INTO hubs (ip, port, status, source, vendor, version, leaves, max_leaves, \
+             up_since, first_seen, last_seen) \
+             VALUES (?1, ?2, 'unverified', 'update', ?3, ?4, ?5, ?6, ?7, ?8, ?8) \
+             ON CONFLICT (ip) DO NOTHING",
+        )
+        .bind(&hub_values(&ip, claim, now))?,
+        db.prepare("UPDATE counts SET n = n + 1 WHERE k = 'hubs'"),
+    ])
+    .await?;
+    Ok(())
+}
+
+/// Refresh a servable hub from its own update on the same port: fields and
+/// `last_seen`; status and failures are the cron's to change. Writes 1 row.
+pub async fn refresh_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<()> {
+    let ip = claim.addr.ip().to_string();
+    db.prepare(
+        "UPDATE hubs SET port = ?2, vendor = ?3, version = ?4, leaves = ?5, max_leaves = ?6, \
+         up_since = ?7, last_seen = ?8 WHERE ip = ?1",
+    )
+    .bind(&hub_values(&ip, claim, now))?
+    .run()
+    .await?;
+    Ok(())
+}
+
+/// Put a hub back in the cron's queue from its own update: a servable hub on
+/// a new port (demoted), or an `unverified` or `dead` row (requeued). Status
+/// `unverified`, source `update`, the claim's port and fields. Writes 1 row,
+/// plus 1 if it was an `X-Try-Hubs` candidate (it leaves that cap).
+pub async fn requeue_hub(
+    db: &D1Database,
+    claim: &HubClaim,
+    now: u64,
+    was_try_hubs: bool,
+) -> Result<()> {
+    let ip = claim.addr.ip().to_string();
+    let mut stmts = vec![
+        db.prepare(
+            "UPDATE hubs SET port = ?2, status = 'unverified', source = 'update', vendor = ?3, \
+             version = ?4, leaves = ?5, max_leaves = ?6, up_since = ?7, last_seen = ?8 \
+             WHERE ip = ?1",
+        )
+        .bind(&hub_values(&ip, claim, now))?,
+    ];
+    if was_try_hubs {
+        stmts.push(db.prepare("UPDATE counts SET n = n - 1 WHERE k = 'hubs_unverified' AND n > 0"));
+    }
+    db.batch(stmts).await?;
+    Ok(())
+}
+
+/// `?1..=?8` for the hub statements above.
+fn hub_values(ip: &str, claim: &HubClaim, now: u64) -> [JsValue; 8] {
+    [
+        ip.into(),
+        num(u64::from(claim.addr.port())),
+        opt_str(claim.vendor.as_deref()),
+        opt_str(claim.version.as_deref()),
+        opt_num(claim.leaves.map(u64::from)),
+        opt_num(claim.max_leaves.map(u64::from)),
+        opt_num(claim.up_since),
+        num(now),
+    ]
+}
+
+/// Store a submitted cache as `pending`, and count it, in one batch. Writes 2
+/// rows.
+pub async fn insert_cache(
+    db: &D1Database,
+    url: &CacheUrl,
+    submitted_by: &str,
+    now: u64,
+) -> Result<()> {
+    db.batch(vec![
+        db.prepare(
+            "INSERT INTO caches (url, host, status, submitted_by, first_seen) \
+             VALUES (?1, ?2, 'pending', ?3, ?4) ON CONFLICT (url) DO NOTHING",
+        )
+        .bind(&[
+            url.url.as_str().into(),
+            url.host.as_str().into(),
+            submitted_by.into(),
+            num(now),
+        ])?,
+        db.prepare("UPDATE counts SET n = n + 1 WHERE k = 'caches'"),
+    ])
+    .await?;
+    Ok(())
+}
+
+/// `UPDATE counts` statements setting each cap counter to its true value,
+/// counted inside the cron's batch so an insert racing the cron is never
+/// erased, and written only when it differs (usually 0 rows written). Each
+/// table is scanned once (`UPDATE … FROM`). `hubs_unverified` counts only
+/// `X-Try-Hubs` candidates: the 150 cap is theirs (ADR-0011).
+pub fn reconcile_counts(db: &D1Database) -> Vec<D1PreparedStatement> {
+    [
+        ("hubs", "SELECT COUNT(*) AS c FROM hubs"),
+        (
+            "hubs_unverified",
+            "SELECT COUNT(*) AS c FROM hubs WHERE status = 'unverified' AND source = 'try_hubs'",
+        ),
+        ("caches", "SELECT COUNT(*) AS c FROM caches"),
+    ]
+    .into_iter()
+    .map(|(k, count)| {
+        db.prepare(format!(
+            "UPDATE counts SET n = t.c FROM ({count}) AS t WHERE counts.k = '{k}' AND counts.n <> t.c"
+        ))
+    })
+    .collect()
 }

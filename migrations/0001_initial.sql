@@ -11,8 +11,9 @@
 --   * Gets read one row: the cron-rendered `snapshots.hostfile`. Only if it is
 --     missing or stale does a request scan `hubs` and `caches`, and it then
 --     writes the snapshot back, so the next requests read it again.
---   * No secondary indexes: every index on a written column doubles a write,
---     and the scans above are bounded by the caps (500 hubs, 50 caches).
+--   * Secondary indexes only where a frequent read needs one: every index on a
+--     written column doubles a write. `caches_host` serves URL submissions;
+--     the request-path scans above are bounded by the caps (500 hubs).
 -- All timestamps are Unix seconds (UTC). Bounds mirror gwc-core's validation,
 -- so a value core accepts can never fail a CHECK; and every integer the Worker
 -- reads back is non-negative, so a value a CHECK accepts can always be decoded.
@@ -34,7 +35,7 @@ CREATE TABLE hubs (
   failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0)
 ) STRICT, WITHOUT ROWID;
 
--- Other GWebCaches. At most 50 rows.
+-- Other GWebCaches. At most 50 rows, at most 3 per host.
 CREATE TABLE caches (
   url            TEXT    NOT NULL PRIMARY KEY CHECK (length(url) BETWEEN 12 AND 255),
   host           TEXT    NOT NULL CHECK (length(host) BETWEEN 1 AND 253), -- for the per-domain cap
@@ -46,6 +47,10 @@ CREATE TABLE caches (
   last_checked   INTEGER CHECK (last_checked IS NULL OR last_checked >= 0),
   failures       INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0)
 ) STRICT, WITHOUT ROWID;
+
+-- The per-host lookup of every URL submission; caches rows are written
+-- rarely (an insert, a status change), so the index costs little.
+CREATE INDEX caches_host ON caches (host);
 
 -- Client/version pairs, derived hourly by cron from request_log.
 CREATE TABLE clients_seen (

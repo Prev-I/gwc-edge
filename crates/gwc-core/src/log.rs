@@ -54,6 +54,10 @@ pub struct RequestLine<'a> {
     /// `memo`, `stored`, `live`, `stale` or `fallback`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<&'a str>,
+    /// For updates: what each part did, e.g. `ip:inserted url:https` or
+    /// `ip:source_mismatch`. Labels only, never an address or URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<&'a str>,
 }
 
 impl RequestLine<'_> {
@@ -95,6 +99,7 @@ mod tests {
             d1_ms: 3,
             cf_colo: "MXP",
             snapshot: Some("stored"),
+            update: None,
         }
     }
 
@@ -121,6 +126,12 @@ mod tests {
         .map(String::from)
         .collect();
         assert_eq!(keys(&line().to_json()), expected);
+        let update = RequestLine {
+            snapshot: None,
+            update: Some("ip:inserted"),
+            ..line()
+        };
+        assert!(keys(&update.to_json()).contains("update"));
         let no_snapshot = RequestLine {
             snapshot: None,
             ..line()

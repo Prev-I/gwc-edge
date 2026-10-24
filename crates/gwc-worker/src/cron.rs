@@ -44,7 +44,16 @@ pub async fn run(env: &Env) -> Result<()> {
     if let Some(json) = &hourly {
         docs.push((store::STATS, json.as_str()));
     }
-    store::write_snapshots(&db, now, &docs).await?;
+    // The cap counters are reconciled in the same batch, so a lost or
+    // concurrent increment never outlives a cron period.
+    store::write_snapshots(&db, now, &docs, store::reconcile_counts(&db)).await?;
+    // This isolate's copies are now stale. It already holds the new hostfile,
+    // so it remembers that (no read, and still a fallback if D1 fails next);
+    // other isolates and data centres catch up within their TTLs.
+    crate::memo::set_hostfile(now, crate::memo::TTL, false, std::rc::Rc::new(snap.clone()));
+    if let Ok(config) = crate::config(env) {
+        crate::pages::purge(&config).await;
+    }
 
     log_run(&snap, now, &summary, hourly.is_some());
     Ok(())

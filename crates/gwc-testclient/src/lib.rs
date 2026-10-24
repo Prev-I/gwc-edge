@@ -56,9 +56,15 @@ impl Reply {
 }
 
 /// A client bound to one cache URL.
+///
+/// Unless a request sets `CF-Connecting-IP` itself, each one carries a
+/// different source address (an IPv6 /64 from the documentation range), so
+/// the cache's per-source rate limits never throttle unrelated tests. A test
+/// that needs a hub's own address sets the header.
 pub struct Client {
     base: String,
     agent: ureq::Agent,
+    next_source: std::cell::Cell<u32>,
 }
 
 impl Client {
@@ -73,9 +79,16 @@ impl Client {
             .user_agent(USER_AGENT)
             .build()
             .into();
+        // A different starting point per client, so clients in different
+        // test binaries do not reuse each other's sources.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos())
+            ^ std::process::id().rotate_left(16);
         Client {
             base: base.to_owned(),
             agent,
+            next_source: std::cell::Cell::new(seed),
         }
     }
 
@@ -101,6 +114,17 @@ impl Client {
         let mut req = ureq::http::Request::builder().method(method).uri(&url);
         for (k, v) in headers {
             req = req.header(*k, *v);
+        }
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("CF-Connecting-IP"))
+        {
+            let n = self.next_source.get();
+            self.next_source.set(n.wrapping_add(1));
+            req = req.header(
+                "CF-Connecting-IP",
+                format!("2001:db8:{:x}:{:x}::1", n >> 16, n & 0xffff),
+            );
         }
         let req = req
             .body(())
@@ -168,6 +192,7 @@ impl Client {
     }
 
     /// Shareaza's hub update: `ip=` first, counters, optional submitted URL.
+    /// Sent from a fresh source address, not the hub's own.
     #[must_use]
     pub fn update(
         &self,
@@ -177,11 +202,43 @@ impl Client {
         max: u32,
         url: Option<&str>,
     ) -> Reply {
-        let url = url.map_or_else(String::new, |u| format!("&url={}", encode(u)));
+        self.request("GET", &update_query(ip_port, leaves, uptime, max, url), &[])
+    }
+
+    /// The same update, sent from `source`: the hub's own address when
+    /// `source` is the IP of `ip_port`.
+    #[must_use]
+    pub fn update_from(
+        &self,
+        source: &str,
+        ip_port: &str,
+        leaves: u32,
+        uptime: u32,
+        max: u32,
+        url: Option<&str>,
+    ) -> Reply {
+        self.request(
+            "GET",
+            &update_query(ip_port, leaves, uptime, max, url),
+            &[("CF-Connecting-IP", source)],
+        )
+    }
+
+    /// Shareaza's submit: a cache URL alone (`DiscoveryServices.cpp:1837-1841`).
+    #[must_use]
+    pub fn submit(&self, url: &str) -> Reply {
         self.get(&format!(
-            "?ip={ip_port}&x.leaves={leaves}&uptime={uptime}&x.max={max}{url}&update=1&net=gnutella2&client={CLIENT}"
+            "?url={}&update=1&net=gnutella2&client={CLIENT}",
+            encode(url)
         ))
     }
+}
+
+fn update_query(ip_port: &str, leaves: u32, uptime: u32, max: u32, url: Option<&str>) -> String {
+    let url = url.map_or_else(String::new, |u| format!("&url={}", encode(u)));
+    format!(
+        "?ip={ip_port}&x.leaves={leaves}&uptime={uptime}&x.max={max}{url}&update=1&net=gnutella2&client={CLIENT}"
+    )
 }
 
 /// The GWC 2.1 extras Shareaza appends to every get (`:1434`).
@@ -224,5 +281,59 @@ mod tests {
         };
         assert_eq!(r.header("X-A"), Some("1"));
         assert_eq!(r.lines(), ["a", "b", "c"]);
+    }
+}
+
+/// Reading the `wrangler dev` output `scripts/integration.sh` captures. Each
+/// test looks only at what was written after it started.
+pub mod logs {
+    use std::time::{Duration, Instant};
+
+    /// Current size of a log file: the offset a test starts reading from.
+    #[must_use]
+    pub fn len(path: &str) -> usize {
+        std::fs::metadata(path).map_or(0, |m| usize::try_from(m.len()).unwrap_or(0))
+    }
+
+    /// The JSON objects in a log from byte `from` on, colour codes and
+    /// prefixes removed.
+    #[must_use]
+    pub fn json_since(path: &str, from: usize) -> Vec<serde_json::Value> {
+        let raw = std::fs::read(path).unwrap_or_default();
+        String::from_utf8_lossy(raw.get(from..).unwrap_or_default())
+            .lines()
+            .filter_map(|l| {
+                let start = l.find('{')?;
+                let end = l.rfind('}')?;
+                serde_json::from_str(&l[start..=end]).ok()
+            })
+            .collect()
+    }
+
+    /// Lines matching `pred` written since `from`: wait until `want` appear,
+    /// then a little longer, so a late duplicate is counted too.
+    pub fn settle(
+        path: &str,
+        from: usize,
+        want: usize,
+        pred: impl Fn(&serde_json::Value) -> bool,
+    ) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while json_since(path, from).iter().filter(|v| pred(v)).count() < want
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        json_since(path, from)
+            .into_iter()
+            .filter(|v| pred(v))
+            .collect()
+    }
+
+    /// A request line: the only lines with an `outcome`.
+    #[must_use]
+    pub fn is_request_line(v: &serde_json::Value) -> bool {
+        v.get("outcome").is_some()
     }
 }

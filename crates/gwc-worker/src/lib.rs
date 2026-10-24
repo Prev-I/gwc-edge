@@ -3,6 +3,7 @@
 
 mod cron;
 mod gwc;
+mod limiter;
 mod memo;
 mod pages;
 mod probe;
@@ -52,6 +53,7 @@ struct Done {
     hosts_sent: usize,
     caches_sent: usize,
     snapshot: Option<&'static str>,
+    update: Option<String>,
     /// The sampled request counter to record, for GWC requests.
     count: Option<Key>,
 }
@@ -67,6 +69,7 @@ impl Done {
             hosts_sent: 0,
             caches_sent: 0,
             snapshot: None,
+            update: None,
             count: None,
         }
     }
@@ -87,6 +90,9 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         .get("Host")?
         .unwrap_or_else(|| url.host_str().unwrap_or_default().to_owned());
     let colo = req.cf().map_or_else(|| "-".to_owned(), worker::Cf::colo);
+    // Set by Cloudflare at the edge; used for the source check and rate keys,
+    // never logged.
+    let source = req.headers().get("CF-Connecting-IP")?.unwrap_or_default();
     let mut probe = Probe::default();
 
     let done = match config(&env) {
@@ -99,7 +105,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
                 &config.canonical_url,
             );
             // A handler error still gets a response and its one log line.
-            match dispatch(route, &url, https, now, &config, &env, &mut probe).await {
+            match dispatch(route, &url, &source, https, now, &config, &env, &mut probe).await {
                 Ok(done) => done,
                 Err(e) => internal_error(&e)?,
             }
@@ -121,9 +127,11 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     finish(done, method, https, now, &colo, &env, &ctx, &probe)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     route: Route,
     url: &worker::Url,
+    source: &str,
     https: bool,
     now: u64,
     config: &Config,
@@ -132,7 +140,16 @@ async fn dispatch(
 ) -> Result<Done> {
     Ok(match route {
         Route::Gwc => {
-            let a = gwc::handle(url.query().unwrap_or(""), https, now, config, env, probe).await;
+            let a = gwc::handle(
+                url.query().unwrap_or(""),
+                source,
+                https,
+                now,
+                config,
+                env,
+                probe,
+            )
+            .await;
             Done {
                 resp: text(&a.body)?,
                 kind: a.key.kind.as_str().to_owned(),
@@ -142,6 +159,7 @@ async fn dispatch(
                 hosts_sent: a.hosts_sent,
                 caches_sent: a.caches_sent,
                 snapshot: a.snapshot,
+                update: a.update,
                 count: Some(a.key),
             }
         }
@@ -223,6 +241,7 @@ fn finish(
         d1_ms: probe.d1_ms,
         cf_colo: colo,
         snapshot: done.snapshot,
+        update: done.update.as_deref(),
     };
     console_log!("{}", line.to_json());
     if done.outcome == Outcome::Degraded {

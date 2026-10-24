@@ -4,53 +4,8 @@
 //! test looks only at the lines written after it started, so other tests'
 //! requests cannot satisfy it.
 
-use std::time::{Duration, Instant};
-
 use gwc_testclient::Client;
-
-/// The JSON objects in a `wrangler dev` log from byte `from` on, colour codes
-/// and prefixes removed.
-fn json_since(path: &str, from: usize) -> Vec<serde_json::Value> {
-    let raw = std::fs::read(path).unwrap_or_default();
-    String::from_utf8_lossy(raw.get(from..).unwrap_or_default())
-        .lines()
-        .filter_map(|l| {
-            let start = l.find('{')?;
-            let end = l.rfind('}')?;
-            serde_json::from_str(&l[start..=end]).ok()
-        })
-        .collect()
-}
-
-fn len(path: &str) -> usize {
-    std::fs::metadata(path).map_or(0, |m| usize::try_from(m.len()).unwrap_or(0))
-}
-
-/// Lines matching `pred` written since `from`: wait until `want` appear, then
-/// a little longer, so a late duplicate is counted too.
-fn settle(
-    path: &str,
-    from: usize,
-    want: usize,
-    pred: impl Fn(&serde_json::Value) -> bool,
-) -> Vec<serde_json::Value> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while json_since(path, from).iter().filter(|v| pred(v)).count() < want
-        && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    std::thread::sleep(Duration::from_millis(500));
-    json_since(path, from)
-        .into_iter()
-        .filter(|v| pred(v))
-        .collect()
-}
-
-/// A request line: the only lines with an `outcome`.
-fn is_request_line(v: &serde_json::Value) -> bool {
-    v.get("outcome").is_some()
-}
+use gwc_testclient::logs::{is_request_line, json_since, len, settle};
 
 /// A request to send: method, path or query, extra headers.
 struct Req {

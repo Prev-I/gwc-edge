@@ -14,3 +14,5 @@ changed by a new record that supersedes the old one, never by editing it.
 | [0007](0007-degraded-mode.md) | Degraded mode: the protocol minimum, no further D1 access |
 | [0008](0008-landing-page-and-non-protocol-routes.md) | Landing page, robots, methods, alias hosts |
 | [0009](0009-one-log-line-per-request.md) | One structured log line per request |
+| [0010](0010-the-write-path.md) | The write path: what an update stores (partly superseded by 0011) |
+| [0011](0011-hubs-are-listed-after-a-handshake.md) | Hubs are listed only after a handshake; coalescing on time; diversity cap |

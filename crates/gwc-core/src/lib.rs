@@ -22,6 +22,7 @@ pub mod response;
 pub mod route;
 pub mod snapshot;
 pub mod stats;
+pub mod update;
 
 #[cfg(test)]
 mod shareaza_model;

@@ -34,11 +34,12 @@ In the dashboard: Workers & Pages → gwc-edge → Observability → Events. Fil
 | `kind` | GWC kinds as in `request_log` (`ping`, `hostfile`, `urlfile`, `update`, `other_net`, `limited`, `denied`, `error`), or a page kind (`page`, `stats`, `healthz`, `robots`, `redirect`, `method_not_allowed`, `not_found`, `config_error`, `internal_error`). |
 | `client`, `version` | From the query; `-` when absent. |
 | `scheme` | `http` or `https`. |
-| `outcome` | `ok`, `rate_limited`, `denied`, `degraded`, `malformed`. |
+| `outcome` | `ok`, `rate_limited` (over a per-source limit: kind `limited`), `denied`, `degraded`, `malformed`. |
 | `hosts_sent`, `caches_sent` | `h|` lines, and `u|` lines other than the cache's own. |
 | `d1_ms` | Time spent waiting on D1. |
 | `cf_colo` | Cloudflare data centre. |
 | `snapshot` | For gets: where the hostfile came from (`memo`, `stored`, `live`, `stale`, `fallback`). |
+| `update` | For updates: what each part did, as labels, e.g. `ip:inserted url:domain_full`. `ip:` is `inserted` (stored `unverified`), `refreshed`, `demoted` (new port: back to `unverified`), `requeued` (an `unverified` or `dead` hub queued again for the cron), `coalesced`, `full`, `error`, or a decline (`source_mismatch`, `not_public`, `bad_port`, `malformed`, `not_g2`); `url:` is `inserted`, `known`, `full`, `domain_full`, `error`, or a decline (`https`, `invalid`, `self`, `not_g2`). No address or URL. |
 
 No line carries the requester's address.
 
@@ -49,6 +50,7 @@ No line carries the requester's address.
 - `{"level":"warn","event":"rows_dropped",…}`: rows that could not be decoded were skipped.
 - `{"level":"warn","event":"snapshot_unparsable",…}`: a stored document this build cannot read; the cron re-renders the stats part on its next run.
 - `{"level":"warn","event":"count_rows_written",…}`: a counter write billed other than 1 row (the budget assumes 1).
+- `{"level":"warn","event":"rate_limiter_unavailable",…}`: the Rate Limiting binding failed; requests are allowed (fail-open). Logged once per isolate, so a binding that recovers and fails again later in the same isolate is not reported twice.
 - `{"kind":"cron",…}`: one per cron run, with its counts and duration (`ms`).
 
 A panic writes no request line; it appears as an uncaught exception in the

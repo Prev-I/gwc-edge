@@ -4,6 +4,7 @@
 //! allowed client. Run by `scripts/integration.sh`.
 
 use gwc_testclient::Client;
+use gwc_testclient::logs::{is_request_line, len, settle};
 
 fn client() -> Client {
     Client::new(
@@ -48,9 +49,17 @@ fn g1_is_self_only() {
 #[test]
 #[ignore = "needs a running degraded cache: scripts/integration.sh"]
 fn update_is_period_then_ok() {
-    let r = client().update("8.8.4.4:6346", 12, 7300, 300, None);
+    // From the hub's own address, so the claim really reaches (failing) D1.
+    let log = std::env::var("GWC_DEGRADED_LOG_FILE").expect("GWC_DEGRADED_LOG_FILE");
+    let from = len(&log);
+    let r = client().update_from("8.8.4.4", "8.8.4.4:6346", 12, 7300, 300, None);
     assert_eq!(r.status, 200);
     assert_eq!(r.lines(), ["i|update|period|3600", "i|update|OK"]);
+    let lines = settle(&log, from, 1, is_request_line);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["kind"], "update");
+    assert_eq!(lines[0]["outcome"], "degraded");
+    assert_eq!(lines[0]["update"], "ip:error");
 }
 
 #[test]

@@ -1,17 +1,20 @@
-//! The GWebCache endpoint and the hostfile read path.
+//! The GWebCache endpoint: rate limiting, the hostfile read path and the
+//! update write path.
 
 use std::rc::Rc;
 
 use gwc_core::config::Config;
 use gwc_core::counters::{Key, Kind};
 use gwc_core::log::Outcome;
+use gwc_core::policy::RateKind;
 use gwc_core::query::{self, Net, Query};
 use gwc_core::response::{Line, Refusal, get_reply, render, update_reply};
 use gwc_core::snapshot::{MAX_SNAPSHOT_AGE, Snapshot};
+use gwc_core::update::{self, CachePlan, HubPlan};
 use worker::{Env, Result};
 
 use crate::probe::Probe;
-use crate::{memo, store};
+use crate::{limiter, memo, store};
 
 /// What answering a GWC request produced, for the response and the log line.
 pub struct Answer {
@@ -22,6 +25,8 @@ pub struct Answer {
     pub caches_sent: usize,
     /// Where the hostfile came from, if one was needed.
     pub snapshot: Option<&'static str>,
+    /// For updates: what each part did (`gwc_core::log::RequestLine::update`).
+    pub update: Option<String>,
 }
 
 /// Answer a GWebCache request. The reply is always protocol-correct: in
@@ -29,6 +34,7 @@ pub struct Answer {
 /// `u|` line, and an update still gets period-then-OK.
 pub async fn handle(
     raw_query: &str,
+    source: &str,
     https: bool,
     now: u64,
     config: &Config,
@@ -63,10 +69,30 @@ pub async fn handle(
         );
     }
     let key = Key::new(Kind::of(&q), client, https);
+    let limited = Key::new(Kind::Limited, client, https);
+    // Only what can cost D1 is limited: Gnutella2 file gets and updates.
+    let rate_kind = RateKind::of(&q).filter(|_| q.net == Net::Gnutella2);
+    if let Some(kind) = rate_kind
+        && !limiter::allowed(env, source, kind).await
+    {
+        // Over the limit: the same successful reply, without data or storage.
+        let lines = if q.is_update() {
+            update_reply(Ok(()))
+        } else {
+            get_reply(&q, &[], &[], &config.canonical_url)
+        };
+        return Answer::new(&lines, limited, Outcome::RateLimited, config, None);
+    }
     if q.is_update() {
-        // Storage arrives with the write path (phase 4); every update a
-        // legitimate client sends is answered OK regardless.
-        return Answer::new(&update_reply(Ok(())), key, Outcome::Ok, config, None);
+        let stored = store_update(&q, source, now, config, env, probe).await;
+        let outcome = if probe.failed() {
+            Outcome::Degraded
+        } else {
+            Outcome::Ok
+        };
+        let mut a = Answer::new(&update_reply(Ok(())), key, outcome, config, None);
+        a.update = Some(stored);
+        return a;
     }
     let (lines, snapshot, degraded) = get_lines(&q, now, config, env, probe).await;
     let outcome = if degraded {
@@ -97,6 +123,7 @@ impl Answer {
             hosts_sent,
             caches_sent,
             snapshot,
+            update: None,
         }
     }
 }
@@ -208,4 +235,141 @@ async fn load_hostfile(
             None => Err(e),
         },
     }
+}
+
+/// Store what an update carries, part by part (`gwc_core::update`), and
+/// say what each part did, for the log line (labels only, never an address
+/// or URL). The reply does not depend on it: a D1 failure only makes the
+/// request degraded.
+async fn store_update(
+    q: &Query,
+    source: &str,
+    now: u64,
+    config: &Config,
+    env: &Env,
+    probe: &mut Probe,
+) -> String {
+    let hub = update::ip_claim(q, source, now);
+    let cache = update::url_claim(q, &config.canonical_url);
+    let mut parts: Vec<String> = Vec::new();
+    let label = |part: &str, what: &str| format!("{part}:{what}");
+
+    let db = if matches!(hub, Some(Ok(_))) || matches!(cache, Some(Ok(_))) {
+        probe.run("binding", || async { store::db(env) }).await.ok()
+    } else {
+        None // nothing storable: no D1 access at all
+    };
+
+    match &hub {
+        None => {}
+        Some(Err(d)) => parts.push(label("ip", d.as_str())),
+        Some(Ok(claim)) => {
+            let what = match &db {
+                Some(db) => store_hub(db, claim, now, probe).await,
+                None => "error",
+            };
+            parts.push(label("ip", what));
+        }
+    }
+    match &cache {
+        None => {}
+        Some(Err(d)) => parts.push(label("url", d.as_str())),
+        Some(Ok(url)) => {
+            let what = match &db {
+                Some(db) => store_cache(db, url, &q.client.vendor, now, probe).await,
+                None => "error",
+            };
+            parts.push(label("url", what));
+        }
+    }
+    parts.join(" ")
+}
+
+async fn store_hub(
+    db: &worker::D1Database,
+    claim: &update::HubClaim,
+    now: u64,
+    probe: &mut Probe,
+) -> &'static str {
+    let ip = claim.addr.ip().to_string();
+    let Ok(existing) = probe.run("read_hub", || store::read_hub(db, &ip)).await else {
+        return "error";
+    };
+    let hubs = if existing.is_none() {
+        match probe
+            .run("read_counter", || store::read_counter(db, "hubs"))
+            .await
+        {
+            Ok(n) => n,
+            Err(_) => return "error",
+        }
+    } else {
+        0
+    };
+    let plan = update::plan_hub(existing.as_ref(), claim, now, hubs);
+    let written = match plan {
+        HubPlan::Insert => {
+            probe
+                .run("insert_hub", || store::insert_hub(db, claim, now))
+                .await
+        }
+        HubPlan::Refresh => {
+            probe
+                .run("refresh_hub", || store::refresh_hub(db, claim, now))
+                .await
+        }
+        HubPlan::Demote => {
+            probe
+                .run("requeue_hub", || store::requeue_hub(db, claim, now, false))
+                .await
+        }
+        HubPlan::Requeue { was_try_hubs } => {
+            probe
+                .run("requeue_hub", || {
+                    store::requeue_hub(db, claim, now, was_try_hubs)
+                })
+                .await
+        }
+        HubPlan::Coalesced | HubPlan::Full => Ok(()),
+    };
+    if written.is_ok() {
+        plan.as_str()
+    } else {
+        "error"
+    }
+}
+
+async fn store_cache(
+    db: &worker::D1Database,
+    url: &gwc_core::cache_url::CacheUrl,
+    submitted_by: &str,
+    now: u64,
+    probe: &mut Probe,
+) -> &'static str {
+    let Ok(same_host) = probe
+        .run("read_caches_for_host", || {
+            store::read_caches_for_host(db, &url.host)
+        })
+        .await
+    else {
+        return "error";
+    };
+    let Ok(caches) = probe
+        .run("read_counter", || store::read_counter(db, "caches"))
+        .await
+    else {
+        return "error";
+    };
+    let plan = update::plan_cache(url, &same_host, caches);
+    if plan == CachePlan::Insert
+        && probe
+            .run("insert_cache", || {
+                store::insert_cache(db, url, submitted_by, now)
+            })
+            .await
+            .is_err()
+    {
+        return "error";
+    }
+    plan.as_str()
 }

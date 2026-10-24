@@ -43,6 +43,14 @@ async fn cache_get(key: &str) -> Option<Response> {
     Some(Response::ok(body).ok()?.with_headers(headers))
 }
 
+/// Drop this data centre's cached landing page and `/stats`, after the cron
+/// has rendered new numbers.
+pub async fn purge(config: &Config) {
+    for page in ["landing", "stats"] {
+        let _ = Cache::default().delete(cache_key(config, page), true).await;
+    }
+}
+
 async fn cache_put(key: &str, resp: &mut Response) {
     if let Ok(copy) = resp.cloned() {
         let _ = Cache::default().put(key, copy).await;

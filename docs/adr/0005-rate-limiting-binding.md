@@ -1,6 +1,7 @@
 # ADR-0005: Rate limiting uses the Workers Rate Limiting binding
 
-**Status:** accepted, 2026-10-23; implemented with the write path.
+**Status:** accepted, 2026-10-23; implemented 2026-10-24 (`GET_LIMITER`
+2 per 60 s, `UPDATE_LIMITER` 1 per 60 s, see ADR-0010).
 
 ## Context
 The brief asks for per-source limits (1 get per 30 s, 1 update per 10 min).
