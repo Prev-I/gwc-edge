@@ -409,8 +409,17 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
 - A missing path becomes `/`.
 - `https://` URLs are recognised but not stored. Shareaza ignores them in `u|`
   lines.
-- DNS names that *resolve* to private addresses cannot be caught here. Cache
-  verification must cover that.
+- DNS names that cannot be public by their form are refused (ADR-0017):
+  special-use and LAN last labels (`.local`, `.internal`, `.home.arpa`,
+  `.lan` and others), and names embedding a non-public IPv4 address the way
+  wildcard DNS services read it: four octets in a row separated by `.` or
+  `-`, or eight hex digits (`10.0.0.1.nip.io`, `a-10-0-0-1-b.sslip.io`,
+  `app-c0a80001.nip.io`).
+- DNS names that *resolve* to private addresses, now or later, cannot be
+  caught here. Sockets from Workers cannot connect to private addresses
+  (documented); for `fetch()` this is assumed. Either way such a cache is not
+  verified while it resolves to one. A name that rebinds only for clients
+  after it was verified remains a documented residual risk (ADR-0017).
 
 **Hub addresses** (`addr::parse_hub`):
 - Canonical dotted-quad IPv4 only, so no leading zeros, which `inet_addr` would

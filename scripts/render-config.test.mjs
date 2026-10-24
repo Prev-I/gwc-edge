@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { canonicalHost, render, stripJsonc } from "./render-config.mjs";
+import { canonicalHost, mayBePublic, render, stripJsonc } from "./render-config.mjs";
 
 const ID = "0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7";
 
@@ -53,11 +53,28 @@ test("only a plain-HTTP canonical URL on port 80 is accepted", () => {
     "http://gwc.example.org/gwc./",
     "http://gwc.example.org/gwc.php.",
     "http://gwc.example.org//",
+    "http://gwc.local/",
+    "http://cache.internal/gwc/",
+    "http://router.home.arpa/",
   ]) {
     assert.throws(() => canonicalHost(bad), /CANONICAL_URL/, bad);
   }
   assert.throws(
-    () => render("{}", { canonicalUrl: "http://a.example/", databaseId: "nope" }),
+    () => render("{}", { canonicalUrl: "http://gwc.example.org/", databaseId: "nope" }),
     /database id/,
   );
+});
+
+test("non-public names are refused as the Worker refuses them (shared vectors)", () => {
+  const vectors = JSON.parse(
+    readFileSync(new URL("../crates/gwc-core/testdata/hostnames.json", import.meta.url), "utf8"),
+  );
+  for (const host of vectors.non_public) {
+    assert.equal(mayBePublic(host), false, host);
+    assert.throws(() => canonicalHost(`http://${host}/`), /CANONICAL_URL/, host);
+  }
+  for (const host of vectors.public) {
+    assert.equal(mayBePublic(host), true, host);
+    assert.equal(canonicalHost(`http://${host}/`), host);
+  }
 });

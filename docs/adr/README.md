@@ -21,3 +21,4 @@ changed by a new record that supersedes the old one, never by editing it.
 | [0014](0014-plain-http-on-a-custom-domain.md) | Plain HTTP, on one Custom Domain; the zone settings Shareaza needs |
 | [0015](0015-deployment-and-frozen-migrations.md) | Deployment renders its config; migrations are frozen from v0.1.0 |
 | [0016](0016-operator-seeding.md) | Operator seeding from another cache; a re-registering hub becomes source `update` (amends 0012) |
+| [0017](0017-cache-url-names-and-dns-rebinding.md) | Cache URL names that cannot be public are refused; DNS rebinding toward clients remains |
