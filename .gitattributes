@@ -3,3 +3,7 @@
 *.sh text eol=lf
 # Generated lock files are hashed byte for byte; never rewrite line endings.
 .mise/locks/** -text
+# Verbatim copies of third-party specifications, hashed byte for byte (docs/spec/README.md).
+docs/spec/*.html -text -whitespace
+docs/spec/*.txt -text -whitespace
+docs/spec/*.html linguist-documentation

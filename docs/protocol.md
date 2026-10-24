@@ -2,10 +2,15 @@
 
 This is the protocol `gwc-edge` implements: GWebCache v2 ("GWC2", pipe-separated
 responses), reconstructed from what Shareaza 2.7 actually sends and accepts.
-The written specification is vague in places, and Shareaza runs on nearly every
-G2 hub (about 97% per the project brief, from <http://crawler.doxu.org/>). So
-where the two differ, Shareaza wins. Every such case is listed in
-[Deviations from the written spec](#deviations-from-the-written-spec).
+The published specifications (kept verbatim in `docs/spec/`) are vague in
+places, and Shareaza runs on nearly every G2 hub (about 97% per the project
+brief, from <http://crawler.doxu.org/>). So where they differ, Shareaza wins.
+Two sections record every difference:
+- [Conformance to the published specifications](#conformance-to-the-published-specifications)
+  maps each clause of GWC1, GWC2 and the Shareaza wiki's "2.1" extension to
+  what `gwc-edge` does;
+- [Deviations from the project brief](#deviations-from-the-project-brief)
+  lists where the brief and Shareaza disagreed, and what was decided.
 
 ## Sources
 
@@ -35,6 +40,20 @@ file.
   - Its User-Agent is `iShareaza <version>` (`Shareaza.cpp:1109-1111`), where
     upstream sends `Shareaza <version>`.
   - Nothing here depends on either value.
+
+**Written specifications** (`docs/spec/README.md` has provenance, hashes and
+licences):
+
+| Short | Document |
+|---|---|
+| `GWC1` | Hauke Dämpfling, *Gnutella Web Caching System*, v1.3.1, 2002: `docs/spec/gwc1-specs.html` |
+| `GWC2` | Hauke Dämpfling, *Version 2 Specifications Client Developers' Guide*, v1.9.4 (beta), 2003: `docs/spec/gwc2-newgwc.html` |
+| `Wiki` | Shareaza Wiki, *GWC specs*, revision 11518 (2016), referenced only: <https://shareaza.sourceforge.net/mediawiki/index.php?title=GWC_specs&oldid=11518> |
+
+`GWC2 §Step 3` names a section of that document. The wiki describes the
+"specification 2.1" extension that Shareaza uses, but it is a recovered page
+that contradicts itself in places. Where it and the oracle differ, the oracle
+is taken.
 
 **Other references:**
 - The live cache `dkac` (<http://dkac.trillinux.org/dkac/dkac.php>) was probed
@@ -445,15 +464,106 @@ by part (`gwc_core::update`, ADR-0010):
   separately), 1 update per 60 s per source; over the limit the reply is the
   same, without data or storage.
 
-## Deviations from the written spec
+## Conformance to the published specifications
 
-The task specification and Shareaza disagree in the places below. The table
-gives what `gwc-edge` does. "Approved" means the project owner decided it.
+Every clause of the written specifications that binds a cache, or shapes what a
+cache sends, is listed below with what `gwc-edge` does. Clauses addressed only
+to clients (how often to query, which caches to pick, how to normalise a URL
+before storing it) are left out unless a cache depends on them.
 
-| # | Written spec | Shareaza | gwc-edge | Status |
+Section names such as `GWC2 §Extras: network` shorten the documents' own titles
+(here "Extras: Using the "Network" Parameter").
+
+The Status column uses these values:
+- **conforms**: the clause holds as written.
+- **variant**: the clause holds in substance, with a difference no conforming
+  parser notices.
+- **deviation**: we deliberately do something else. The reason is given, with
+  the row of [Deviations from the project brief](#deviations-from-the-project-brief)
+  where one applies.
+- **not supported**: an optional feature we do not implement.
+- **open**: not yet decided.
+
+### GWC2 (v1.9.4), the specification implemented
+
+| Clause | gwc-edge | Status |
+|---|---|---|
+| A cache always outputs at least one line; an empty file is invalid (`GWC2 §Step 2`). | Every reply to an allowed client has at least one line: a get ends with `u\|<self>\|0`, a lone ping gets the pong, an update gets `i\|update\|period` and `i\|update\|OK`, a malformed query gets `i\|error\|…`. A denylisted client's get gets an empty body, so that Shareaza drops this cache (#4). | conforms; deviation for denylisted clients |
+| Plain HTTP: 3xx means redirect, 4xx–5xx means error (`GWC2 §Step 2`). | A GWC request on `/` or the canonical path is answered `200 OK` with a reason phrase. Other answers: 301 only for non-GWC requests on secondary hosts; 404 for GWC parameters on any other path; 405 for methods other than `GET`/`HEAD`; 500 only for a missing or invalid configuration or an internal error. | conforms |
+| A reply beginning `ERROR` is a cache error, and the client drops the cache (`GWC2 §Step 2`). | Never sent. | conforms |
+| Clients handle CR, LF or CRLF line endings (`GWC2 §Step 2`). | `\n` after every line, the last one included. | conforms |
+| Clients must send `client`: a 4-character ID of uppercase letters plus up to 16 version characters (`GWC2 §Step 2`). | Required. Without it, or when its first 4 characters are not all letters or digits, the reply is `i\|error\|client required` or `i\|error\|client needs a 4-character vendor code`. The vendor is the first 4 characters, uppercased; digits and lowercase letters are accepted too. The version is the rest, or `version=` when given, sanitised and cut to 16 characters. | conforms |
+| Parameter order does not matter, and each appears once (`GWC2 §Step 2`). | Order is ignored. If a parameter repeats, the first occurrence wins. | conforms |
+| Values are escape-encoded (RFC 1738) (`GWC2 §Step 2`). | Decoded as `application/x-www-form-urlencoded`, so `+` also decodes to a space. | conforms |
+| Lines are `x\|field\|…`, with `I`, `U` and `H` in capitals (`GWC2 §Step 3`). | Written `i\|`, `u\|` and `h\|` in lowercase. The same clause lets a line start with any letter or digit and asks parsers to be general. Shareaza matches the first field case-insensitively (see "Reading a get response"). The wiki uses lowercase too. | variant |
+| `I\|pong\|<version string>` answers a ping (`GWC2 §Step 3`). | `i\|pong\|gwc-edge <version>\|gnutella2`. The networks field is the wiki's 2.1 extension, and `GWC2 §Step 3` itself tells clients to expect extra fields after the version. | conforms |
+| `I\|update\|OK` on success (`GWC2 §Step 3`). | `i\|update\|OK`, preceded by `i\|update\|period\|3600`, because Shareaza stops reading at `OK`. | conforms |
+| `I\|update\|WARNING\|…` with `You came back too early`, `Rejected IP` or `Rejected URL` (`GWC2 §Step 3`, `§Step 4`). | Never sent to a legitimate client. Declined and rate-limited updates get the same `OK`, and the data is not stored. Shareaza counts any reply without `OK` as a failure, and `You came back too early` as an explicit one (`DS:1898-1909`). | deviation (#3, #12, approved) |
+| `I\|nothing` when there is no other output (`GWC2 §Step 3`). | Never needed: a get always carries the self line. | conforms |
+| `U\|<url>\|<age>`: the URL of an *alternate* cache, and the seconds since it was submitted (`GWC2 §Step 3`). | `u\|<url>\|<age>`, where age is the seconds since the cache was last verified, which suits the "freshness" reading of `GWC2 §Extras: timestamp`. Every get also ends with `u\|<self>\|0`, which lists this cache rather than an alternate one, so Shareaza counts the reply as a success (#4). Its permanent age 0 tells a client following `§Extras: timestamp` that this cache is always "very fresh", so it may update a little less often; Shareaza ignores ages. | variant; deviation for the self line (#4, approved) |
+| `H\|<ip:port>\|<age>`, where age is the seconds since submission (`GWC2 §Step 3`). | `h\|<ip:port>\|<age>[\|…]`, where age is the seconds since the hub was last seen. It may carry extended fields, which the clause allows. | variant |
+| A cache may send `X-Remote-IP` (`GWC2 §Step 3`). | Not sent. The clause makes it optional, and tells clients to trust `Remote-IP` from the Gnutella handshake instead. | not supported (optional) |
+| Updates are `update=1` with `ip=<ip>:<port>` and/or `url=<url>`, and the IP is checked against the address the server sees (`GWC2 §Step 4`). | A hub is stored only when `ip=` equals `CF-Connecting-IP`. Any other address is declined without a warning (see "What gwc-edge stores"). | conforms (the check); deviation for the reply (#3) |
+| Updates sent too early are rejected; once an hour is the norm (`GWC2 §Step 4`). | 1 update per 60 s per source, the longest period the binding allows (ADR-0005). The binding is approximate, counts per data centre, and fails open. A hub's row is written at most once per 30 min whatever the rate. A source can still submit a new `url=` every 60 s; those are held to 3 per host and 50 in all, and stay `pending` until verified. The reply is `OK` either way (#3). | variant for hubs; deviation for `url=`, bounded by the caps and verification |
+| `get=1` returns hosts and/or URLs (`GWC2 §Step 5`). | A `get` naming neither `hostfile` nor `urlfile` returns both. Shareaza always names one. | conforms |
+| "Updates can be combined with Gets and Pings" (`GWC2 §Step 2`); the example reply to an update with a ping is `I\|pong\|…` then `I\|update\|…` (`GWC2 §Step 3`). | A query carrying `ip=` or `url=` is answered as an update only: no pong, no hosts, no caches (`gwc-worker` `gwc::handle`). Pings and gets combine with each other. Shareaza never combines an update with either (see "Requests Shareaza sends"). | deviation |
+| URLs always begin with `http://`, in requests and responses (`GWC1 §2.2`, `GWC2 §Step 1`, `§Step 3`). | Only `http://` URLs are stored and served, and `CANONICAL_URL` must be one (see "Cache URLs"). | conforms |
+| Hosts are numerical `ip:port`, with no leading zeros (`GWC2 §Step 1`, `§Step 2`). | Only canonical dotted-quad IPv4 addresses are stored, so every `h\|` line is canonical (see "Hub addresses"). | conforms |
+| `net=<name>` selects a network. An unsupported one gets `I\|net-not-supported`, and its updates are kept as "redirect" URLs (`GWC2 §Extras: network`). | Only `gnutella2` is served. A get with any other `net` gets only the self line (a lone ping still gets the pong), with no `net-not-supported` line, and nothing is stored. Storing foreign-network URLs as redirects is not implemented (this cache serves G2 only). The `net-not-supported` line, which the clause requires, is omitted; Shareaza ignores unknown `i\|` lines, so adding it would change nothing for the oracle. | deviation |
+| Without `net`, Gnutella is implied to be the default network (`GWC2 §Extras: network`: "more than just the default Gnutella hosts"; GWC1, which has no `net`, is Gnutella-only). | A missing or empty `net` is treated as `gnutella2`. Shareaza 2.7 always sends `net`, on gets and updates (`DS:1413-1431`, `DS:1858-1863`), but a client that omits it is served as G2: a get receives G2 hubs, and with `ping` a pong, which a Shareaza-style G1 parser rejects on any G1 query (`DS:1641-1646`); its `ip=` is queued as a G2 hub, and its `url=` stored as a `pending` G2 cache. The handshake will not always weed such a hub out: a Gnutella ultrapeer answering a 503 with a reason other than Shareaza's four would be judged `alive_full` and served. | **open** |
+| `cluster=` on updates is stored, and returned after the age (`GWC2 §Extras: clustering`, alpha). | Ignored on update. The `h\|` cluster field is always empty. Shareaza sends `getclusters=0` and skips the field (`DS:1490`). | not supported |
+
+### GWC1 (v1.3.1), the original specification
+
+Shareaza's Gnutella get still mixes in GWC1 parameters (`version=`,
+`hostfile=1`). Everything else in GWC1 is answered in the GWC2 format.
+
+| Clause | gwc-edge | Status |
+|---|---|---|
+| `hostfile=1` and `urlfile=1` return plain `ip:port` and URL lists (`GWC1 §2.1`, `§2.2`). | The parameters are accepted, with or without `get=1`, and answered in the GWC2 format. Shareaza accepts plain lines, but it then flags the cache as G1-only (`DS:1771-1785`), so we never send them. | deviation |
+| Return about 20 hosts and 10–20 URLs, the newest ones (`GWC1 §2.1`, `§2.2`, `§4`). | At most `HOSTFILE_COUNT` (20) hosts, newest first, with at most 1 per /24 and 4 per /16 (ADR-0011). At most `URLFILE_COUNT` (20) URLs, plus the self line. | conforms |
+| Accept `ip1` and `url1` for `ip` and `url` (`GWC1 §2.3`). | Not accepted. No current client sends them. | not supported |
+| An update's first line is `OK` or `ERROR` (`GWC1 §2.3`). | The update gets the GWC2 reply. Shareaza looks for `OK` on any line (`DS:1898`). | deviation (GWC2 format) |
+| A ping is answered `PONG <version>` (`GWC1 §2.4`). | The GWC2 pong. `PONG` fails a Shareaza G1 query (`DS:1750-1757`). | deviation (GWC2 format) |
+| A request with no query may show an HTML page; `stats=1` may show statistics (`GWC1 §2.5`). | `/` without GWC parameters is the landing page. Statistics are at `/stats` (JSON). | conforms |
+| `statfile=1` returns total requests, requests in the last hour, and updates in the last hour (`GWC1 §2.6`). | Not supported. A query carrying only `statfile` is not a GWC request: it gets the landing page or the 301. The same counts are in `/stats`. | not supported |
+| Clients *should* send `client` and `version` (`GWC1 §2.7`). | Accepted, and the version may be glued to the vendor code (#1). `client` is required, as GWC2 makes it: a GWC1 client without it gets only `i\|error\|client required`. | deviation (GWC2's rule) |
+| `Content-Type` is `text/*` (`GWC1 §3.1`, `§4`). | `text/plain; charset=utf-8`. | conforms |
+| `ERROR` only when the cache will be down for a while. Invalid submissions, and clients blocked by the `§4.1` update rule, get `OK` followed by a warning (`GWC1 §4`). | Never `ERROR`. Invalid and rate-limited submissions get `OK`, without the warning (#3). (Denylisted clients are outside this clause: their gets get an empty body and their updates a warning without `OK`, so that they drop this cache; #4, #6.) | variant |
+| Accept one update per IP every ~55 minutes, so that a bad submitter gets one entry an hour in (`GWC1 §4.1`). | See the GWC2 update-rate row above: it holds for hubs, not for `url=` submissions. | variant for hubs; deviation for `url=` |
+| Keep answering hostfile and urlfile requests from a client whose updates are blocked (`GWC1 §4.1`). | Gets and updates are limited under separate keys (`policy::RateKind`). | conforms |
+| Check that a submitted IP is the requester's (`GWC1 §4.1`). | Done (`CF-Connecting-IP`). | conforms |
+| A cache may ping submitted URLs (`GWC1 §4.1`). | A submitted URL is stored `pending` and is never served while pending. Pinging it is the verifying cron's job, from phase 5; until then no submitted URL is served. | conforms |
+| Keep only a few entries, flushing the oldest (`GWC1 §4`). | Up to 500 hubs and 50 caches, so that verification has a pool to draw from. Only hubs seen in the last 2 hours are served (`snapshot::LIST_WINDOW`). | variant |
+
+### Shareaza wiki: "specification 2.1" and Shareaza's own behaviour
+
+| Clause | gwc-edge | Status |
+|---|---|---|
+| `net` names are lowercase, and caches lowercase what they receive. | Lowercased. | conforms |
+| The pong carries the networks joined by `-`. | `gnutella2`. | conforms |
+| `I\|update\|OK\|WARNING` (minor) and `I\|WARNING\|…`. | Never sent (#3). | deviation (approved) |
+| `H\|ip:port\|age\|cluster\|leaves\|vendor\|uptime\|max leaves`. | The same order, which is Shareaza's (`DS:1474`). The wiki also numbers these fields differently elsewhere. A field is filled only when it passes Shareaza's checks: leaves and leaf limit 0..2047, uptime 61 s to 1 year, vendor 4 alphanumerics and not `foxy`. Otherwise it is left empty, and trailing empty fields are dropped. | conforms |
+| `getleaves`, `getvendors` and `getuptime` enable those fields; `getclusters` enables clusters. | The flags are not read. The extended fields are filled whenever they are known, and the cluster field is always empty. Shareaza always sends the flags, and GWC2 parsers must accept extra fields. | variant |
+| `getnetworks` returns `i\|nets\|…` and/or `i\|networks\|…`. | Not sent. Shareaza checks those lines only when they are present (`DS:1706-1749`). | not supported |
+| `spec` forces a specification, and `pv` negotiates one. | Ignored. Shareaza sends `pv=4`, which has no effect on what it accepts. | not supported |
+| `info` and `support` return details about the cache. | Not supported. A query carrying only these is not a GWC request. | not supported |
+| Updates carry `x_leaves` (≤2047; because PHP turns dots in parameter names into underscores, caches should accept both `x.leaves` and `x_leaves`), `x_max` (≤2047) and `uptime` (60 s to 1 year, in seconds). | Both spellings are accepted for both, since Shareaza sends `x.leaves` and `x.max`. Values are stored within their columns' bounds and served only within Shareaza's (see the `H` row). | conforms |
+| `multi=1` (a cache pinging another cache) asks for `I\|pong\|<name>\|<nets>\|<url adding>`. `cache=1` marks the requester as a cache. | Both are ignored. A ping gets the ordinary pong, without the trailing flag. | not supported |
+| Caches ping other caches with `client=TEST` and `version=<cache name>`. | Accepted, like any client. | conforms |
+| `statfile` and `bfile` (spec 1 extras; `bfile` asks for hosts and URLs at once). | Not supported: `statfile` as in GWC1 above; a query carrying only `bfile` is not a GWC request either. | not supported |
+| Shareaza reacts to `i\|access\|period`, `i\|update\|period`, `i\|force\|remove`, `i\|update\|warning\|bad url`, `early`, `ERROR`, `OK`. | `i\|update\|period\|3600` and `i\|update\|OK` are sent. None of the lines that remove the cache or count as a failure is ever sent to a legitimate client (see "Reading a get response" and "Reading an update response"). | conforms |
+| Shareaza 2.4 sent no `net` on Gnutella queries. | Shareaza 2.7 sends `net=gnutella` (`DS:1427-1431`). Older clients still in the field that send no `net` are exactly the case of the open GWC2 row. | see the open row |
+
+## Deviations from the project brief
+
+The project brief and Shareaza disagree in the places below. The table gives
+what `gwc-edge` does. "Approved" means the project owner decided it.
+
+| # | Project brief | Shareaza | gwc-edge | Status |
 |---|---|---|---|---|
 | 1 | Every client sends `client=XXXX` and `version=`. | G2 requests glue the version onto `client` and send no `version=` (`DS:1423`, `DS:1862`). | Vendor = first 4 characters of `client`. Version = `version=` if present, else the rest of `client`. | resolved |
-| 2 | `ping` and `get` are separate requests; hosts and caches can be asked together. | Every G2 get carries `ping=1`, and hosts and caches are always separate requests (`DS:1413-1422`). | Commands combine freely: pong, then hosts, then caches. | resolved |
+| 2 | `ping` and `get` are separate requests; hosts and caches can be asked together. | Every G2 get carries `ping=1`, and hosts and caches are always separate requests (`DS:1413-1422`). | Gets and pings combine freely: pong, then hosts, then caches. An update is answered as an update only (see the conformance table). | resolved |
 | 3 | Rate-limited update → `i\|update\|WARNING\|too many requests`; invalid update → WARNING. | Any update reply without `OK` is a failure, and 2 failures remove the cache (`DS:1898`, `DS:1942`, `Set:344`). Hubs send third-party URLs and alternate G1/G2 updates (`DS:1298`, `DS:872-881`). | `i\|update\|period\|3600` + `i\|update\|OK` for everything except denylisted clients: accepted, merged, rate-limited and declined updates alike. | **approved** (decision A, extended) |
 | 4 | Denylisted client, empty cache, G1 → empty hostfile. | A get that adds nothing is a failure (`DS:1794-1802`), and removal deletes the G2 entry too (`DS:2153-2156`). | Every hostfile/urlfile get ends with the cache's own `u\|` line, G1 included. Only denylisted clients get an empty body. | **approved** (decision B, and the G1 follow-up) |
 | 5 | The update period hint was proposed as 600 s. | `m_nUpdatePeriod` defaults to 3600 s (`DS:2139`, `Set:343`). | 3600. | resolved (corrects our own proposal) |
