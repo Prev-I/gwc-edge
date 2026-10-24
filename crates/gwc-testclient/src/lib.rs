@@ -75,7 +75,9 @@ impl Client {
             .http_status_as_error(false)
             // A 301 must be seen, not followed: the tests check it.
             .max_redirects(0)
-            .timeout_global(Some(Duration::from_secs(10)))
+            // A cron run answers only when it is done, and a stalled hub
+            // takes it 8 s (`verify::HANDSHAKE_TIMEOUT_MS`).
+            .timeout_global(Some(Duration::from_secs(30)))
             .user_agent(USER_AGENT)
             .build()
             .into();

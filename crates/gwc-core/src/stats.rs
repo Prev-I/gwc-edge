@@ -110,18 +110,42 @@ pub struct CacheCounts {
     pub failed: u64,
 }
 
-/// What the last cron run did. Verification fields stay 0 until hubs are
-/// verified by the cron.
+/// What the last cron run did (ADR-0012).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CronRun {
     pub last_run_at: u64,
     pub last_run_ms: u64,
-    pub candidates: u64,
+    /// Hubs picked for a handshake.
+    pub picked: u64,
+    /// Handshake verdicts.
     pub verified: u64,
     pub alive_full: u64,
     pub dead: u64,
+    /// Hubs picked but not dialled: the subrequest budget, or the connection
+    /// slots, ran out.
     pub skipped_budget: u64,
+    /// Sockets whose close timed out: they may still hold connection slots,
+    /// so the run dials fewer at a time after each.
+    pub leaked_sockets: u64,
+    /// The verification's D1 work failed (logged as `d1_error`); its results
+    /// were not stored, though its `cron_hub` lines were logged.
+    pub verification_failed: bool,
+    /// Failed `X-Try-Hubs` candidates deleted.
+    pub deleted: u64,
+    /// New `X-Try-Hubs` candidates stored.
+    pub candidates_added: u64,
+    /// `dead` rows deleted: silent for 48 h, or beyond the dead-row cap.
+    pub purged: u64,
+    pub evicted: u64,
+    /// Cache pings, and how they ended.
+    pub caches_pinged: u64,
+    pub caches_verified: u64,
+    pub caches_failed: u64,
+    /// Subrequests counted against the run's budget.
+    pub subrequests: u64,
+    /// `TEST_DIAL` was set: an integration-test build, never production.
+    pub test_dial: bool,
 }
 
 /// The per-run part, `snapshots.cron`.

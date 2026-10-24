@@ -4,7 +4,9 @@
 //! `DiscoveryServices.cpp:1413-1434` (get) and `:1824-1870` (update); see
 //! `docs/protocol.md` for the reconstruction this module implements.
 
-/// Network named by `net=`. A missing or empty `net` means Gnutella2.
+/// Network named by `net=`. A missing or empty `net` means Gnutella, the
+/// default network of GWC2 ("Extras: Using the Network Parameter"); only an
+/// explicit `net=gnutella2` is served.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Net {
     Gnutella2,
@@ -28,6 +30,9 @@ pub const MAX_VERSION_LEN: usize = 16;
 
 /// Longest `net` value kept.
 const MAX_NET_LEN: usize = 16;
+
+/// The network a query without `net` names.
+const DEFAULT_NET: &str = "gnutella";
 
 /// A parsed request. Several commands may be combined in one query: Shareaza
 /// adds `ping=1` to every G2 get, and sends `ip=` and `url=` in one update.
@@ -118,8 +123,9 @@ pub fn parse(raw: &str) -> Result<Query, QueryError> {
     }
 
     let net = match p.net.as_deref().map(str::to_ascii_lowercase) {
-        None => Net::Gnutella2,
-        Some(n) if n.is_empty() || n == "gnutella2" => Net::Gnutella2,
+        Some(n) if n == "gnutella2" => Net::Gnutella2,
+        None => Net::Other(DEFAULT_NET.to_owned()),
+        Some(n) if n.is_empty() => Net::Other(DEFAULT_NET.to_owned()),
         Some(n) => Net::Other(n.chars().take(MAX_NET_LEN).collect()),
     };
 
@@ -306,7 +312,12 @@ mod tests {
     fn task_spec_ping_shape() {
         let q = parse("ping=1&client=TEST&version=0.1").unwrap();
         assert!(q.ping);
-        assert_eq!(q.net, Net::Gnutella2, "missing net= means gnutella2");
+        // GWC2 "Extras: Using the Network Parameter": Gnutella is the default.
+        assert_eq!(
+            q.net,
+            Net::Other("gnutella".into()),
+            "missing net= means gnutella"
+        );
         assert_eq!(
             q.client,
             Client {
@@ -337,14 +348,14 @@ mod tests {
     }
 
     #[test]
-    fn net_is_case_insensitive_and_empty_means_g2() {
+    fn net_is_case_insensitive_and_empty_means_gnutella() {
         assert_eq!(
             parse("ping=1&client=RAZA&net=GNUTELLA2").unwrap().net,
             Net::Gnutella2
         );
         assert_eq!(
             parse("ping=1&client=RAZA&net=").unwrap().net,
-            Net::Gnutella2
+            Net::Other("gnutella".into())
         );
         assert_eq!(
             parse("ping=1&client=RAZA&net=Gnutella").unwrap().net,

@@ -14,7 +14,8 @@ disagree, Shareaza wins, and the deviation is recorded in `docs/protocol.md`
 crates/gwc-core/    pure protocol logic, no `worker` dependency, >= 90% line coverage
 crates/gwc-worker/  thin Workers adapter: routing, D1, cron (cdylib, wasm32)
 crates/gwc-testclient/  native client that speaks exactly as Shareaza 2.7.10.6;
-                    its tests/ run against wrangler dev (scripts/integration.sh)
+                    its tests/ run against wrangler dev (scripts/integration.sh);
+                    src/bin/fake_peer.rs answers the cron's handshakes and pings
 migrations/         D1 migrations, applied in order by wrangler
 docs/protocol.md    the protocol authority: GWC v2 as Shareaza speaks it, with citations
 docs/adr/           one record per decision; change a decision with a new record
@@ -92,7 +93,15 @@ every push to `main`.
   `crates/gwc-worker/src/store.rs` holds every statement and its cost; the
   header of migration 0001 states the rules.
 - **Stay inside one invocation's budget:** 10 ms CPU, 50 D1 queries, 50 external
-  subrequests, 6 simultaneous connections (TCP sockets included).
+  subrequests, 6 simultaneous connections (TCP sockets included). The cron
+  counts every socket, fetch and D1 statement against a ledger
+  (`gwc_core::verify::Ledger`, ceiling 45); a new statement in the cron's
+  path must be added to `cron::TAIL` or `store::*_STATEMENTS` (ADR-0012).
+- **Only the cron changes a hub's status to listed or `dead`, writes
+  `last_checked`, or resets `failures`**; no request deletes a row
+  (ADR-0012).
+- **`TEST_DIAL` is for `scripts/integration.sh` only.** Never put it in a
+  `wrangler*.jsonc`; a core test enforces it.
 - **Migration 0001 may still be edited in place** only while `wrangler.jsonc`
   has no `database_id`. After the first remote apply, every change is a new
   `migrations/000N_*.sql`. Core tests check that the CHECK constraints match

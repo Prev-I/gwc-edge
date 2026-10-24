@@ -30,9 +30,9 @@ CREATE TABLE hubs (
   max_leaves    INTEGER CHECK (max_leaves IS NULL OR max_leaves BETWEEN 0 AND 65535),
   up_since      INTEGER CHECK (up_since IS NULL OR up_since >= 0), -- last update time minus reported uptime
   first_seen    INTEGER NOT NULL CHECK (first_seen >= 0),
-  last_seen     INTEGER NOT NULL CHECK (last_seen >= 0), -- last accepted update or successful verification
-  last_checked  INTEGER CHECK (last_checked IS NULL OR last_checked >= 0), -- last handshake attempt, any outcome
-  failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0)
+  last_seen     INTEGER NOT NULL CHECK (last_seen >= 0), -- last accepted update or successful verification; for a dead row, the last registration accepted after its backoff
+  last_checked  INTEGER CHECK (last_checked IS NULL OR last_checked >= 0), -- last handshake attempt, any outcome; written by the cron only
+  failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0) -- consecutive failed handshakes; reset only by a successful one
 ) STRICT, WITHOUT ROWID;
 
 -- Other GWebCaches. At most 50 rows, at most 3 per host.
@@ -77,12 +77,15 @@ CREATE TABLE request_log (
 
 -- Row counts for the caps, so a cap check reads one row instead of scanning.
 -- Incremented in the same batch as each insert; reconciled by cron.
+--   hubs_live:       hubs not 'dead' (the 500 cap; dead rows are bounded by the cron)
+--   hubs_unverified: 'unverified' X-Try-Hubs candidates (the 150 cap)
+--   caches:          every cache row (the 50 cap)
 CREATE TABLE counts (
-  k  TEXT    NOT NULL PRIMARY KEY CHECK (k IN ('hubs', 'hubs_unverified', 'caches')),
+  k  TEXT    NOT NULL PRIMARY KEY CHECK (k IN ('hubs_live', 'hubs_unverified', 'caches')),
   n  INTEGER NOT NULL DEFAULT 0 CHECK (n >= 0)
 ) STRICT, WITHOUT ROWID;
 
-INSERT INTO counts (k, n) VALUES ('hubs', 0), ('hubs_unverified', 0), ('caches', 0);
+INSERT INTO counts (k, n) VALUES ('hubs_live', 0), ('hubs_unverified', 0), ('caches', 0);
 
 -- Documents rendered by cron; the request path reads one row.
 --   hostfile: gwc_core::snapshot::Snapshot, every cron run

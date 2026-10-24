@@ -1,7 +1,8 @@
 # ADR-0006: Capacity caps, and what may enter `hubs`
 
-**Status:** accepted, 2026-10-23; enforced by the write path (ADR-0010); the
-unverified cap and deletion on first failure come with the verifying cron.
+**Status:** accepted, 2026-10-23; enforced by the write path (ADR-0010) and
+the verifying cron (ADR-0012). Amended by ADR-0012: the 500-hub cap counts
+live rows only (not `dead`), and `dead` rows have bounds of their own.
 
 ## Context
 The G2 network has about 35 hubs. Fake registrations cost writes on every

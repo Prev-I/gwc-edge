@@ -2,6 +2,7 @@
 //! point. Protocol decisions live in `gwc_core`.
 
 mod cron;
+mod dial;
 mod gwc;
 mod limiter;
 mod memo;

@@ -92,10 +92,10 @@ fn numbers(h: &mut String, s: &Stats) {
         let _ = write!(
             h,
             "<h2>Last cron run <span class=\"m\">{} · {} ms</span></h2>\
-             <p>{} candidates · {} verified · {} full · {} dead · {} skipped</p>",
+             <p>{} picked · {} verified · {} full · {} dead · {} skipped</p>",
             utc(run.last_run_at),
             run.last_run_ms,
-            run.candidates,
+            run.picked,
             run.verified,
             run.alive_full,
             run.dead,
@@ -197,11 +197,12 @@ mod tests {
             run: CronRun {
                 last_run_at: NOW - 120,
                 last_run_ms: 412,
-                candidates: 20,
+                picked: 20,
                 verified: 17,
                 alive_full: 2,
                 dead: 1,
                 skipped_budget: 0,
+                ..CronRun::default()
             },
             ..CronSummary::default()
         };
@@ -267,7 +268,7 @@ mod tests {
             ">9872<",
             "412 ms",
             "2026-10-23 08:28 UTC",
-            "20 candidates",
+            "20 picked",
         ] {
             assert!(html.contains(text), "{text}");
         }
@@ -318,7 +319,7 @@ mod tests {
             s.hubs.alive_full = counts[2].into();
             s.caches.verified = counts[3].into();
             s.cron.last_run_ms = counts[4].into();
-            s.cron.candidates = counts[5].into();
+            s.cron.picked = counts[5].into();
             s.requests.total = counts[6].into();
             s.health.d1_errors_24h = counts[7].into();
             s.requests.by_client[0].version = version;

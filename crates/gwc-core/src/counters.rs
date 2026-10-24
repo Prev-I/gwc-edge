@@ -95,16 +95,18 @@ impl Kind {
     /// The kind of a parsed, allowed, not rate-limited query.
     #[must_use]
     pub fn of(q: &Query) -> Kind {
-        if q.net != Net::Gnutella2 {
+        let lone_ping = !(q.is_update() || q.hostfile || q.urlfile);
+        if lone_ping {
+            // Answered with the pong on any network (`response::get_reply`).
+            Kind::Ping
+        } else if q.net != Net::Gnutella2 {
             Kind::OtherNet
         } else if q.is_update() {
             Kind::Update
         } else if q.hostfile {
             Kind::Hostfile
-        } else if q.urlfile {
-            Kind::Urlfile
         } else {
-            Kind::Ping
+            Kind::Urlfile
         }
     }
 }
@@ -211,12 +213,25 @@ mod tests {
             Kind::Urlfile
         );
         assert_eq!(
-            kind("get=1&client=RAZA"),
+            kind("get=1&net=gnutella2&client=RAZA"),
             Kind::Hostfile,
             "both files count as hostfile"
         );
-        assert_eq!(kind("ping=1&client=TEST"), Kind::Ping);
-        assert_eq!(kind("ip=8.8.4.4:6346&update=1&client=RAZA"), Kind::Update);
+        assert_eq!(kind("ping=1&net=gnutella2&client=TEST"), Kind::Ping);
+        assert_eq!(
+            kind("ping=1&client=TEST&version=0.1"),
+            Kind::Ping,
+            "a lone ping is answered on any network, so it counts as a ping"
+        );
+        assert_eq!(
+            kind("ip=8.8.4.4:6346&update=1&net=gnutella2&client=RAZA"),
+            Kind::Update
+        );
+        assert_eq!(
+            kind("get=1&hostfile=1&client=RAZA"),
+            Kind::OtherNet,
+            "no net= means Gnutella"
+        );
         assert_eq!(
             kind("get=1&hostfile=1&net=gnutella&client=RAZA"),
             Kind::OtherNet

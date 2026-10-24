@@ -190,6 +190,9 @@ struct Health {
     git_sha: &'static str,
     database: &'static str,
     config: String,
+    /// `TEST_DIAL` is set: an integration-test configuration, which must
+    /// never reach production (ADR-0012).
+    test_dial: bool,
     cron: &'static str,
     /// Seconds since each snapshot was rendered.
     snapshot_age: BTreeMap<String, u64>,
@@ -242,6 +245,7 @@ pub async fn healthz(
         git_sha: GIT_SHA,
         database,
         config: config_status,
+        test_dial: config.is_ok_and(|c| c.test_dial.is_some()),
         cron,
         snapshot_age,
     };

@@ -17,6 +17,8 @@ worker.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 console_error_panic_hook.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
 
 [lints]
 workspace = true

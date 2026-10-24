@@ -402,9 +402,13 @@ pub async fn read_hub(db: &D1Database, ip: &str) -> Result<Option<HubRow>> {
         status: String,
         source: String,
         last_seen: f64,
+        last_checked: Option<f64>,
+        failures: f64,
     }
     let row: Option<R> = db
-        .prepare("SELECT port, status, source, last_seen FROM hubs WHERE ip = ?1")
+        .prepare(
+            "SELECT port, status, source, last_seen, last_checked, failures FROM hubs WHERE ip = ?1",
+        )
         .bind(&[ip.into()])?
         .first(None)
         .await?;
@@ -414,11 +418,13 @@ pub async fn read_hub(db: &D1Database, ip: &str) -> Result<Option<HubRow>> {
             status: r.status,
             source: r.source,
             last_seen: int(r.last_seen)?,
+            last_checked: r.last_checked.and_then(int),
+            failures: int(r.failures)?,
         })
     }))
 }
 
-/// One cap counter (`hubs`, `hubs_unverified` or `caches`). Reads 1 row.
+/// One cap counter (`hubs_live`, `hubs_unverified` or `caches`). Reads 1 row.
 pub async fn read_counter(db: &D1Database, k: &str) -> Result<u64> {
     #[derive(Deserialize)]
     struct R {
@@ -470,19 +476,36 @@ pub async fn insert_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<(
              ON CONFLICT (ip) DO NOTHING",
         )
         .bind(&hub_values(&ip, claim, now))?,
-        db.prepare("UPDATE counts SET n = n + 1 WHERE k = 'hubs'"),
+        db.prepare("UPDATE counts SET n = n + 1 WHERE k = 'hubs_live'"),
     ])
     .await?;
     Ok(())
 }
 
 /// Refresh a servable hub from its own update on the same port: fields and
-/// `last_seen`; status and failures are the cron's to change. Writes 1 row.
+/// `last_seen`; status and failures are the cron's to change. Writes 1 row,
+/// or none if the cron made it `dead` since it was read.
 pub async fn refresh_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<()> {
     let ip = claim.addr.ip().to_string();
     db.prepare(
         "UPDATE hubs SET port = ?2, vendor = ?3, version = ?4, leaves = ?5, max_leaves = ?6, \
-         up_since = ?7, last_seen = ?8 WHERE ip = ?1",
+         up_since = ?7, last_seen = ?8 WHERE ip = ?1 AND status IN ('verified', 'alive_full')",
+    )
+    .bind(&hub_values(&ip, claim, now))?
+    .run()
+    .await?;
+    Ok(())
+}
+
+/// A `dead` hub registering again after its backoff: the claim's port and
+/// fields and `last_seen = now`, which queues it for the cron's next check.
+/// Status and failures stay: only a handshake revives it (ADR-0012). Writes
+/// 1 row.
+pub async fn reregister_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<()> {
+    let ip = claim.addr.ip().to_string();
+    db.prepare(
+        "UPDATE hubs SET port = ?2, vendor = ?3, version = ?4, leaves = ?5, max_leaves = ?6, \
+         up_since = ?7, last_seen = ?8 WHERE ip = ?1 AND status = 'dead'",
     )
     .bind(&hub_values(&ip, claim, now))?
     .run()
@@ -491,9 +514,11 @@ pub async fn refresh_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<
 }
 
 /// Put a hub back in the cron's queue from its own update: a servable hub on
-/// a new port (demoted), or an `unverified` or `dead` row (requeued). Status
+/// a new port (demoted), or an `unverified` row (requeued). Status
 /// `unverified`, source `update`, the claim's port and fields. Writes 1 row,
-/// plus 1 if it was an `X-Try-Hubs` candidate (it leaves that cap).
+/// plus 1 if it was an `X-Try-Hubs` candidate (it leaves that cap). A row the
+/// cron made `dead` since it was read is left alone: only a handshake revives
+/// a dead row (ADR-0012).
 pub async fn requeue_hub(
     db: &D1Database,
     claim: &HubClaim,
@@ -505,7 +530,7 @@ pub async fn requeue_hub(
         db.prepare(
             "UPDATE hubs SET port = ?2, status = 'unverified', source = 'update', vendor = ?3, \
              version = ?4, leaves = ?5, max_leaves = ?6, up_since = ?7, last_seen = ?8 \
-             WHERE ip = ?1",
+             WHERE ip = ?1 AND status <> 'dead'",
         )
         .bind(&hub_values(&ip, claim, now))?,
     ];
@@ -558,11 +583,15 @@ pub async fn insert_cache(
 /// `UPDATE counts` statements setting each cap counter to its true value,
 /// counted inside the cron's batch so an insert racing the cron is never
 /// erased, and written only when it differs (usually 0 rows written). Each
-/// table is scanned once (`UPDATE … FROM`). `hubs_unverified` counts only
-/// `X-Try-Hubs` candidates: the 150 cap is theirs (ADR-0011).
+/// table is scanned once (`UPDATE … FROM`). `hubs_live` counts rows that are
+/// not `dead` (ADR-0012); `hubs_unverified` counts only `X-Try-Hubs`
+/// candidates: the 150 cap is theirs (ADR-0011).
 pub fn reconcile_counts(db: &D1Database) -> Vec<D1PreparedStatement> {
     [
-        ("hubs", "SELECT COUNT(*) AS c FROM hubs"),
+        (
+            "hubs_live",
+            "SELECT COUNT(*) AS c FROM hubs WHERE status <> 'dead'",
+        ),
         (
             "hubs_unverified",
             "SELECT COUNT(*) AS c FROM hubs WHERE status = 'unverified' AND source = 'try_hubs'",
@@ -576,4 +605,306 @@ pub fn reconcile_counts(db: &D1Database) -> Vec<D1PreparedStatement> {
         ))
     })
     .collect()
+}
+
+// ------------------------------------------------------------- verifying cron
+
+/// A hub the cron may check.
+#[derive(Debug, Clone)]
+pub struct QueuedHub {
+    pub ip: String,
+    pub port: u16,
+    pub status: String,
+    pub source: String,
+    pub failures: u64,
+}
+
+/// A cache the cron may ping.
+#[derive(Debug, Clone)]
+pub struct QueuedCache {
+    pub url: String,
+    pub failures: u64,
+}
+
+/// What the cron reads before dialling.
+pub struct CronQueue {
+    /// One queue per `verify::Class`, each in its own order.
+    pub hubs: [Vec<QueuedHub>; 4],
+    pub caches: Vec<QueuedCache>,
+    pub hubs_live: u64,
+    pub hubs_unverified: u64,
+}
+
+/// Statements [`cron_queue`] issues.
+pub const QUEUE_STATEMENTS: u32 = 3;
+
+/// The hub queue (four classes, in `verify::Class` order) and the cache queue.
+fn queue_sql() -> (String, String) {
+    use gwc_core::verify::{
+        CACHE_RECHECK, CACHE_RETRY, HANDSHAKES_PER_RUN, PINGS_PER_RUN, RECHECK, RETRY,
+    };
+    // `k` carries each class's own order to the outer ORDER BY, which is
+    // what guarantees it: a UNION ALL keeps no order by itself.
+    let class = |n: usize, filter: &str, key: &str| {
+        format!(
+            "SELECT * FROM (SELECT {n} AS class, {key} AS k, ip, port, status, source, failures \
+             FROM hubs WHERE {filter} ORDER BY k LIMIT {HANDSHAKES_PER_RUN})"
+        )
+    };
+    let hubs = [
+        class(0, "status = 'unverified' AND source <> 'try_hubs'", "last_seen"),
+        class(
+            1,
+            &format!(
+                "status IN ('verified', 'alive_full') AND (last_checked IS NULL \
+                 OR last_checked <= ?1 - {RECHECK} OR (failures >= 1 AND last_checked <= ?1 - {RETRY}))"
+            ),
+            "COALESCE(last_checked, -1)",
+        ),
+        class(2, "status = 'dead' AND last_seen > COALESCE(last_checked, 0)", "last_seen"),
+        class(3, "status = 'unverified' AND source = 'try_hubs'", "-last_seen"),
+    ]
+    .join(" UNION ALL ")
+        + " ORDER BY class, k";
+    let caches = format!(
+        "SELECT url, failures FROM caches \
+         WHERE status = 'pending' \
+         OR (status = 'failed' AND COALESCE(last_checked, 0) <= ?1 - {CACHE_RETRY}) \
+         OR (status = 'verified' AND COALESCE(last_checked, 0) <= ?1 - {CACHE_RECHECK}) \
+         ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END, \
+         COALESCE(last_checked, first_seen) ASC LIMIT {PINGS_PER_RUN}"
+    );
+    (hubs, caches)
+}
+
+/// The cron's queues and cap counters, in one batch of
+/// [`QUEUE_STATEMENTS`] statements.
+///
+/// Reads: four scans of `hubs` (at most 500 live rows plus
+/// `verify::DEAD_MAX` dead ones; no index, which would cost a written row on
+/// every check), returning at most `HANDSHAKES_PER_RUN` rows per class; one
+/// scan of `caches` (at most 50 rows); the 3 `counts` rows.
+///
+/// A whole run, at full occupancy (500 live and 1,000 dead hubs), scans
+/// `hubs` 11 to 13 times: these four, the purge, the eviction (count and
+/// ordered scan), the live snapshot, the status counts and two reconciles,
+/// plus the purge and eviction deletes if SQLite scans for them. That is
+/// 16,500 to 19,500 rows a run, 2.4 to 2.8 million a day of the 5 million
+/// allowed, not counting the request path's live fallback; the real network
+/// (35 hubs) reads a few hundred rows a run.
+pub async fn cron_queue(db: &D1Database, now: u64) -> Result<CronQueue> {
+    #[derive(Deserialize)]
+    struct H {
+        class: f64,
+        ip: String,
+        port: f64,
+        status: String,
+        source: String,
+        failures: f64,
+    }
+    #[derive(Deserialize)]
+    struct C {
+        url: String,
+        failures: f64,
+    }
+    #[derive(Deserialize)]
+    struct N {
+        k: String,
+        n: f64,
+    }
+    let (hubs, caches) = queue_sql();
+    let results = db
+        .batch(vec![
+            db.prepare(hubs).bind(&[num(now)])?,
+            db.prepare(caches).bind(&[num(now)])?,
+            db.prepare("SELECT k, n FROM counts"),
+        ])
+        .await?;
+    let [hub_rows, cache_rows, count_rows] = results.as_slice() else {
+        return Err(worker::Error::RustError("cron_queue: batch shape".into()));
+    };
+
+    let mut queues: [Vec<QueuedHub>; 4] = Default::default();
+    for (class, hub) in keep(hub_rows, "cron_queue_hubs", |h: H| {
+        Some((
+            int::<usize>(h.class)?,
+            QueuedHub {
+                ip: h.ip,
+                port: int(h.port)?,
+                status: h.status,
+                source: h.source,
+                failures: int(h.failures)?,
+            },
+        ))
+    })? {
+        if let Some(q) = queues.get_mut(class) {
+            q.push(hub);
+        }
+    }
+
+    let caches = keep(cache_rows, "cron_queue_caches", |c: C| {
+        Some(QueuedCache {
+            url: c.url,
+            failures: int(c.failures)?,
+        })
+    })?;
+
+    let counts = keep(count_rows, "cron_queue_counts", |c: N| {
+        Some((c.k, int::<u64>(c.n)?))
+    })?;
+    let count = |k: &str| {
+        counts
+            .iter()
+            .find(|(name, _)| name == k)
+            .map_or(0, |(_, n)| *n)
+    };
+    Ok(CronQueue {
+        hubs: queues,
+        caches,
+        hubs_live: count("hubs_live"),
+        hubs_unverified: count("hubs_unverified"),
+    })
+}
+
+/// A check's result for one hub, as `verify::after_check` decided it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HubVerdict {
+    pub ip: String,
+    pub port: u16,
+    pub status: &'static str,
+    pub failures: u64,
+    /// A successful check: `last_seen = now`.
+    pub seen: bool,
+}
+
+/// A ping's result for one cache.
+pub struct CachePing {
+    pub url: String,
+    pub action: gwc_core::verify::CacheAction,
+}
+
+/// Everything the checks decided, to apply in one batch.
+#[derive(Default)]
+pub struct CronWrites {
+    pub verdicts: Vec<HubVerdict>,
+    /// Failed `X-Try-Hubs` candidates.
+    pub deletes: Vec<String>,
+    /// New candidates and the `last_seen` each gets.
+    pub candidates: Vec<(std::net::SocketAddrV4, u64)>,
+    pub caches: Vec<CachePing>,
+}
+
+/// Rows removed by the cron's own housekeeping.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Removed {
+    pub purged: usize,
+    pub evicted: usize,
+    pub candidates_added: usize,
+}
+
+/// Most statements [`apply_cron`] issues: hub verdicts, candidate deletes,
+/// candidate inserts, the purge, the eviction, and one per pinged cache.
+#[allow(clippy::cast_possible_truncation)] // a small constant
+pub const APPLY_STATEMENTS: u32 = 5 + gwc_core::verify::PINGS_PER_RUN as u32;
+
+/// Apply a run's results in one batch (ADR-0012). Each guard is evaluated
+/// when the batch runs, not when the hub was read, so a request racing the
+/// cron wins:
+/// - a verdict applies only to the port that was dialled;
+/// - a failed candidate is deleted only if it is still an `unverified`
+///   candidate (one that registered itself meanwhile stays).
+///
+/// Writes: 1 row per verdict, deleted candidate, inserted candidate, purged
+/// or evicted row and pinged cache. Reads: the verdict and delete statements
+/// look rows up by primary key; the purge and the eviction each scan `hubs`.
+pub async fn apply_cron(db: &D1Database, now: u64, w: &CronWrites) -> Result<Removed> {
+    use gwc_core::verify::{CacheAction, DEAD_MAX, DEAD_TTL, PURGE_BATCH};
+    let json = |v: &serde_json::Value| JsValue::from(v.to_string());
+    let mut stmts = Vec::new();
+    if !w.verdicts.is_empty() {
+        stmts.push(
+            db.prepare(
+                "UPDATE hubs SET status = j.status, failures = j.failures, last_checked = ?2, \
+                 last_seen = CASE WHEN j.seen THEN ?2 ELSE hubs.last_seen END \
+                 FROM (SELECT value ->> 'ip' AS ip, CAST(value ->> 'port' AS INTEGER) AS port, \
+                 value ->> 'status' AS status, CAST(value ->> 'failures' AS INTEGER) AS failures, \
+                 CAST(value ->> 'seen' AS INTEGER) AS seen FROM json_each(?1)) AS j \
+                 WHERE hubs.ip = j.ip AND hubs.port = j.port",
+            )
+            .bind(&[json(&serde_json::json!(w.verdicts)), num(now)])?,
+        );
+    }
+    if !w.deletes.is_empty() {
+        stmts.push(
+            db.prepare(
+                "DELETE FROM hubs WHERE ip IN (SELECT value FROM json_each(?1)) \
+                 AND status = 'unverified' AND source = 'try_hubs'",
+            )
+            .bind(&[json(&serde_json::json!(w.deletes))])?,
+        );
+    }
+    let insert_at = stmts.len();
+    if !w.candidates.is_empty() {
+        let list: Vec<_> = w
+            .candidates
+            .iter()
+            .map(|(a, seen)| serde_json::json!({"ip": a.ip().to_string(), "port": a.port(), "seen": seen}))
+            .collect();
+        stmts.push(
+            db.prepare(
+                "INSERT INTO hubs (ip, port, status, source, first_seen, last_seen) \
+                 SELECT value ->> 'ip', CAST(value ->> 'port' AS INTEGER), 'unverified', 'try_hubs', \
+                 ?2, CAST(value ->> 'seen' AS INTEGER) FROM json_each(?1) WHERE true \
+                 ON CONFLICT (ip) DO NOTHING",
+            )
+            .bind(&[json(&serde_json::json!(list)), num(now)])?,
+        );
+    }
+    let purge_at = stmts.len();
+    stmts.push(
+        db.prepare(format!(
+            "DELETE FROM hubs WHERE ip IN (SELECT ip FROM hubs WHERE status = 'dead' \
+             AND last_seen < ?1 AND COALESCE(last_checked, first_seen) < ?1 LIMIT {PURGE_BATCH})"
+        ))
+        .bind(&[num(now.saturating_sub(DEAD_TTL))])?,
+    );
+    stmts.push(db.prepare(format!(
+        "DELETE FROM hubs WHERE ip IN (SELECT ip FROM hubs WHERE status = 'dead' \
+         ORDER BY COALESCE(last_checked, first_seen) ASC \
+         LIMIT min({PURGE_BATCH}, max(0, (SELECT COUNT(*) FROM hubs WHERE status = 'dead') - {DEAD_MAX})))"
+    )));
+    for c in &w.caches {
+        let url: JsValue = c.url.as_str().into();
+        stmts.push(match &c.action {
+            CacheAction::Verified { pong } => db
+                .prepare(
+                    "UPDATE caches SET status = 'verified', pong = ?2, failures = 0, \
+                     last_verified = ?3, last_checked = ?3 WHERE url = ?1",
+                )
+                .bind(&[url, pong.as_str().into(), num(now)])?,
+            CacheAction::Failed { failures } => db
+                .prepare(
+                    "UPDATE caches SET status = 'failed', failures = ?2, last_checked = ?3 WHERE url = ?1",
+                )
+                .bind(&[url, num(*failures), num(now)])?,
+            CacheAction::Delete => db.prepare("DELETE FROM caches WHERE url = ?1").bind(&[url])?,
+        });
+    }
+    let results = db.batch(stmts).await?;
+    let changes = |i: usize| {
+        results
+            .get(i)
+            .and_then(|r| r.meta().ok().flatten())
+            .and_then(|m| m.changes)
+            .unwrap_or(0)
+    };
+    Ok(Removed {
+        candidates_added: if w.candidates.is_empty() {
+            0
+        } else {
+            changes(insert_at)
+        },
+        purged: changes(purge_at),
+        evicted: changes(purge_at + 1),
+    })
 }

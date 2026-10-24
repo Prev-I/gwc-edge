@@ -5,11 +5,18 @@
 //! |---|---|---|---|
 //! | 1.1.1.1:6347 | `alive_full` | 30 s ago | served first |
 //! | 8.8.4.4:6346 | `verified`, RAZA, 120/300 leaves, up 2.5 h | 120 s ago | served second, extended fields |
-//! | 9.9.9.9:6346 | `unverified` | now | not served |
+//! | 9.9.9.9:6346 | `unverified` | now | not served; `dead` after the first cron run |
 //! | 8.8.8.8:6346 | `verified` | 8000 s ago | expired, not served |
-//! | 9.9.9.10:6346 | `dead` | 86000 s ago | not served, counted as dead |
+//! | 9.9.9.10:6346 | `dead`, 3 failures, checked 60 s ago | 86000 s ago | not served, counted as dead |
+//! | 4.2.10.1:6346 | `dead`, 1 failure, checked 700 s ago | 90000 s ago | not served (until `tests/verify.rs`) |
+//! | 4.2.11.1:6346 | `dead`, silent for 55 h | 200000 s ago | purged by the first cron run |
 //!
 //! Caches: dkac verified 600 s ago (served), `pending.example.org` (not).
+//!
+//! The listed seeds were checked "now", so the cron leaves them alone for 90
+//! minutes. The script runs the cron once before these tests: it checks
+//! 9.9.9.9 (blocked by `TEST_DIAL`, so it is now `dead`), purges 4.2.11.1,
+//! fails `pending.example.org`, and verifies dkac against a fake cache.
 //!
 //! Run with `scripts/integration.sh`; the tests are ignored by plain
 //! `cargo test` because they need the server.
@@ -174,14 +181,19 @@ fn stats_reports_live_counts() {
         "8.8.4.4; the expired 8.8.8.8 is not current"
     );
     assert_eq!(json["hubs"]["alive_full"], 1);
-    assert_eq!(json["hubs"]["unverified"], 1);
+    assert_eq!(json["hubs"]["unverified"], 0, "9.9.9.9 failed its check");
     assert_eq!(
-        json["hubs"]["dead"], 1,
+        json["hubs"]["dead"], 3,
         "dead hubs count whatever their age"
     );
-    assert_eq!(json["hubs"]["total"], 5);
+    assert_eq!(json["hubs"]["total"], 6, "seven seeded, one purged");
     assert_eq!(json["caches"]["verified"], 1);
-    assert_eq!(json["caches"]["pending"], 1);
+    assert_eq!(json["caches"]["pending"], 0);
+    assert_eq!(json["caches"]["failed"], 1, "pending.example.org: no pong");
+    assert_eq!(json["cron"]["picked"], 1, "only 9.9.9.9 was due");
+    assert_eq!(json["cron"]["dead"], 1);
+    assert_eq!(json["cron"]["purged"], 1, "4.2.11.1");
+    assert_eq!(json["cron"]["caches_verified"], 1, "dkac");
     assert_eq!(json["sample_rate"], 8);
     assert!(json["requests"]["by_kind"]["hostfile"].is_u64());
     assert!(json["cron"]["last_run_at"].as_u64().unwrap() > 0);
