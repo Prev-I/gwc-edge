@@ -18,6 +18,18 @@ use std::net::SocketAddrV4;
 
 use crate::response::{HostEntry, UrlEntry};
 
+/// `snapshots.k` values: the documents the cron renders.
+pub mod keys {
+    /// [`super::Snapshot`], every cron run.
+    pub const HOSTFILE: &str = "hostfile";
+    /// `crate::stats::Hourly` as JSON, hourly.
+    pub const STATS: &str = "stats";
+    /// `crate::stats::CronSummary` as JSON, every cron run.
+    pub const CRON: &str = "cron";
+    /// Every key, in the order the CHECK constraint lists them.
+    pub const ALL: [&str; 3] = [HOSTFILE, STATS, CRON];
+}
+
 /// A hub drops out of the hostfile this long after it was last seen alive
 /// (successful update or verification).
 pub const LIST_WINDOW: u64 = 2 * 60 * 60;
@@ -230,6 +242,16 @@ mod tests {
                 last_verified: NOW - 600,
             }],
         }
+    }
+
+    #[test]
+    fn migration_check_lists_exactly_the_snapshot_keys() {
+        let sql = include_str!("../../../migrations/0001_initial.sql");
+        let list: Vec<String> = keys::ALL.iter().map(|k| format!("'{k}'")).collect();
+        assert!(
+            sql.contains(&format!("CHECK (k IN ({}))", list.join(", "))),
+            "snapshots.k CHECK out of sync with snapshot::keys::ALL"
+        );
     }
 
     #[test]

@@ -1,40 +1,57 @@
 #!/usr/bin/env bash
 # End-to-end tests: start the Worker under `wrangler dev` with a fresh,
 # isolated local D1, seed it, run the cron once, then run the Rust test
-# client's integration tests (crates/gwc-testclient/tests) against it.
+# client's integration tests (crates/gwc-testclient/tests) against it. A
+# second Worker with no D1 binding (wrangler.no-d1.jsonc) exercises the
+# degraded mode.
 #
 # Usage: scripts/integration.sh      (needs mise tools on PATH)
-# Env:   GWC_PORT  port for wrangler dev (default 18789)
+# Env:   GWC_PORT  port for wrangler dev (default 18789); the degraded
+#                  Worker uses the next port
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 port="${GWC_PORT:-18789}"
 base="http://127.0.0.1:$port/"
+degraded_port=$((port + 1))
+degraded_base="http://127.0.0.1:$degraded_port/"
 # The advertised URL, passed explicitly so the tests do not depend on the
 # value a deployer puts in wrangler.jsonc.
 self_url="http://gwc.example.org/"
 state="$(mktemp -d)"   # isolated D1 state: never touches .wrangler/state
 log="$(mktemp)"
+degraded_log="$(mktemp)"
 pid=""
-trap '[ -n "$pid" ] && { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }; rm -rf "$log" "$state"' EXIT
+degraded_pid=""
+cleanup() {
+  for p in "$pid" "$degraded_pid"; do
+    [ -n "$p" ] && { kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; }
+  done
+  rm -rf "$log" "$degraded_log" "$state"
+}
+trap cleanup EXIT
 curl_opts=(--silent --connect-timeout 2 --max-time 5)
 
 fail() {
   echo "integration: $1" >&2
   echo "--- wrangler dev log ---" >&2
   cat "$log" >&2
+  echo "--- degraded wrangler dev log ---" >&2
+  cat "$degraded_log" >&2
   exit 1
 }
 
-if curl "${curl_opts[@]}" -o /dev/null "$base"; then
-  echo "port $port is already in use; set GWC_PORT" >&2
-  exit 1
-fi
+for b in "$base" "$degraded_base"; do
+  if curl "${curl_opts[@]}" -o /dev/null "$b"; then
+    echo "$b is already in use; set GWC_PORT" >&2
+    exit 1
+  fi
+done
 
 # Compile the test client first: the seed timestamps below are relative to
 # now, and the tests check ages, so nothing slow may run between seeding and
 # testing except starting the Worker.
-cargo test -p gwc-testclient --test read_path --no-run >/dev/null \
+cargo test -p gwc-testclient --tests --no-run >/dev/null \
   || { echo "integration: test client does not compile" >&2; exit 1; }
 
 wrangler d1 migrations apply DB --local --persist-to "$state" >/dev/null
@@ -45,27 +62,33 @@ wrangler d1 execute DB --local --persist-to "$state" --command "
     ('1.1.1.1', 6347, 'alive_full', 'update', NULL, NULL, NULL, NULL, NULL, $now, $((now - 30))),
     ('8.8.4.4', 6346, 'verified',   'update', 'RAZA', '2.7.10.6', 120, 300, $((now - 9000)), $((now - 9000)), $((now - 120))),
     ('9.9.9.9', 6346, 'unverified', 'update', NULL, NULL, NULL, NULL, NULL, $now, $now),
-    ('8.8.8.8', 6346, 'verified',   'update', NULL, NULL, NULL, NULL, NULL, $((now - 9000)), $((now - 8000)));
+    ('8.8.8.8', 6346, 'verified',   'update', NULL, NULL, NULL, NULL, NULL, $((now - 9000)), $((now - 8000))),
+    ('9.9.9.10', 6346, 'dead',      'update', NULL, NULL, NULL, NULL, NULL, $((now - 90000)), $((now - 86000)));
   INSERT INTO caches (url, host, status, first_seen, last_verified) VALUES
     ('http://dkac.trillinux.org/dkac/dkac.php', 'dkac.trillinux.org', 'verified', $now, $((now - 600))),
     ('http://pending.example.org/', 'pending.example.org', 'pending', $now, NULL);
 " >/dev/null
 
+# Wait until a freshly started wrangler answers /healthz with $2.
+await_health() {
+  local url=$1 want=$2 child=$3 code=000 deadline=$((SECONDS + 180))
+  while ((SECONDS < deadline)); do
+    code="$(curl "${curl_opts[@]}" -o /dev/null -w '%{http_code}' "${url}healthz" || true)"
+    [ "$code" != 000 ] && break
+    kill -0 "$child" 2>/dev/null || fail "wrangler dev ($url) exited early"
+    sleep 1
+  done
+  [ "$code" = "$want" ] || fail "$url/healthz answered $code, expected $want"
+  kill -0 "$child" 2>/dev/null || fail "$url answered, but not from the wrangler just started"
+}
+
 # Start the Worker in a fresh process, so its isolate remembers nothing.
 # --test-scheduled exposes /__scheduled, to run the cron on demand.
 start_worker() {
   wrangler dev --port "$port" --ip 127.0.0.1 --persist-to "$state" --test-scheduled \
-    --var "SELF_URL:$self_url" >>"$log" 2>&1 &
+    --var "CANONICAL_URL:$self_url" >>"$log" 2>&1 &
   pid=$!
-  local code=000 deadline=$((SECONDS + 180))
-  while ((SECONDS < deadline)); do
-    code="$(curl "${curl_opts[@]}" -o /dev/null -w '%{http_code}' "${base}healthz" || true)"
-    [ "$code" != 000 ] && break
-    kill -0 "$pid" 2>/dev/null || fail "wrangler dev exited early"
-    sleep 1
-  done
-  [ "$code" = 200 ] || fail "/healthz answered $code"
-  kill -0 "$pid" 2>/dev/null || fail "/healthz answered, but not from the wrangler just started"
+  await_health "$base" 200 "$pid"
 }
 
 # Stop it and wait until the port is free, so the next start cannot be
@@ -81,7 +104,27 @@ stop_worker() {
   done
 }
 
+# The degraded Worker first: both Workers build into the same directory, so
+# it finishes building before the main one starts, and the main one's later
+# restart only reloads it (harmless: it holds no state). It has no D1 binding
+# at all, so its /healthz is 503.
+wrangler dev -c wrangler.no-d1.jsonc --port "$degraded_port" --ip 127.0.0.1 \
+  --var "CANONICAL_URL:$self_url" >>"$degraded_log" 2>&1 &
+degraded_pid=$!
+await_health "$degraded_base" 503 "$degraded_pid"
+
 start_worker
+
+# Before the first cron run there are no numbers: the landing page says so
+# and is not cached.
+canonical_host="${self_url#http://}"
+canonical_host="${canonical_host%/}"
+for attempt in 1 2; do
+  headers="$(curl "${curl_opts[@]}" -o /dev/null -D - -H "Host: $canonical_host" "$base")" \
+    || fail "landing request failed"
+  grep -qi '^x-gwc-cache: miss' <<<"$headers" \
+    || fail "landing page before the first cron run was cached (attempt $attempt)"
+done
 
 # Before the first cron run there is no stored snapshot: the hostfile must
 # come from the live fallback, which writes the snapshot back.
@@ -93,9 +136,10 @@ grep -q '"hostfile":' <<<"$health" || fail "live fallback did not write the snap
 
 curl "${curl_opts[@]}" "${base}__scheduled?cron=*/10+*+*+*+*" >/dev/null || fail "cron trigger failed"
 # /__scheduled answers 200 whatever the cron did: prove it ran. Only the
-# cron writes the stats document.
+# cron writes the stats and cron documents.
 health="$(curl "${curl_opts[@]}" "${base}healthz")" || fail "healthz request failed"
 grep -q '"stats":' <<<"$health" || fail "cron did not render stats: $health"
+grep -q '"cron":"ok"' <<<"$health" || fail "cron heartbeat missing: $health"
 grep -q '"event":"cron_failed"' "$log" && fail "cron logged a failure"
 
 # A fresh isolate, so the tests read the stored snapshot rather than the copy
@@ -103,7 +147,14 @@ grep -q '"event":"cron_failed"' "$log" && fail "cron logged a failure"
 stop_worker
 start_worker
 
-GWC_BASE_URL="$base" GWC_SELF_URL="$self_url" GWC_SEED_AT="$now" \
-  cargo test -p gwc-testclient --test read_path -- --ignored \
+# The main Worker's restart rebuilt the shared build directory; make sure the
+# degraded Worker has finished reloading before its tests run.
+await_health "$degraded_base" 503 "$degraded_pid"
+
+# One test thread: the log test counts lines, and the edge-cache tests rely
+# on request order.
+GWC_BASE_URL="$base" GWC_CANONICAL_URL="$self_url" GWC_SEED_AT="$now" \
+GWC_DEGRADED_URL="$degraded_base" GWC_LOG_FILE="$log" GWC_DEGRADED_LOG_FILE="$degraded_log" \
+  cargo test -p gwc-testclient --tests -- --ignored --test-threads=1 \
   || fail "integration tests failed"
 echo "integration: ok"

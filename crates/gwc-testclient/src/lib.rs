@@ -20,10 +20,21 @@ pub struct Reply {
     pub status: u16,
     pub content_type: Option<String>,
     pub cache_control: Option<String>,
+    /// Every header, names lowercased.
+    pub headers: Vec<(String, String)>,
     pub body: String,
 }
 
 impl Reply {
+    /// First value of a header, by case-insensitive name.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
     /// Non-empty lines, trimmed the way Shareaza trims them.
     #[must_use]
     pub fn lines(&self) -> Vec<&str> {
@@ -56,6 +67,8 @@ impl Client {
     pub fn new(base: &str) -> Client {
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // A 301 must be seen, not followed: the tests check it.
+            .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(10)))
             .user_agent(USER_AGENT)
             .build()
@@ -73,28 +86,59 @@ impl Client {
     /// If the request cannot be made at all.
     #[must_use]
     pub fn get(&self, suffix: &str) -> Reply {
+        self.request("GET", suffix, &[])
+    }
+
+    /// Any method, with extra headers (e.g. `Host`, `Accept`), as a browser
+    /// or another tool would send it.
+    ///
+    /// # Panics
+    ///
+    /// If the request cannot be made at all, or the method is unsupported.
+    #[must_use]
+    pub fn request(&self, method: &str, suffix: &str, headers: &[(&str, &str)]) -> Reply {
         let url = format!("{}{}", self.base, suffix.trim_start_matches('/'));
+        let mut req = ureq::http::Request::builder().method(method).uri(&url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let req = req
+            .body(())
+            .unwrap_or_else(|e| panic!("{method} {url}: {e}"));
         let mut resp = self
             .agent
-            .get(&url)
-            .call()
-            .unwrap_or_else(|e| panic!("GET {url}: {e}"));
-        let header = |name: &str| {
-            resp.headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
+            .run(req)
+            .unwrap_or_else(|e| panic!("{method} {url}: {e}"));
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_ascii_lowercase(),
+                    v.to_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        let find = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
         };
-        let (content_type, cache_control) = (header("content-type"), header("cache-control"));
+        let (content_type, cache_control) = (find("content-type"), find("cache-control"));
         let status = resp.status().as_u16();
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .unwrap_or_else(|e| panic!("body of {url}: {e}"));
+        let body = if method == "HEAD" {
+            String::new()
+        } else {
+            resp.body_mut()
+                .read_to_string()
+                .unwrap_or_else(|e| panic!("body of {url}: {e}"))
+        };
         Reply {
             status,
             content_type,
             cache_control,
+            headers,
             body,
         }
     }
@@ -175,8 +219,10 @@ mod tests {
             status: 200,
             content_type: None,
             cache_control: None,
+            headers: vec![("x-a".into(), "1".into())],
             body: "a\r\n\r\n b \nc".into(),
         };
+        assert_eq!(r.header("X-A"), Some("1"));
         assert_eq!(r.lines(), ["a", "b", "c"]);
     }
 }

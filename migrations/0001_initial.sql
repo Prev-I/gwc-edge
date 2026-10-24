@@ -6,7 +6,8 @@
 -- Budget rules (Workers Free + D1 Free: 100k requests, 100k rows written and
 -- 5M rows read per day), see docs/adr/ once written:
 --   * The request path writes nothing unless a read in the same invocation
---     showed a row will change; the only exception is the sampled counter.
+--     showed a row will change; the exceptions are the sampled counter and the
+--     health flush, both after the response (AGENTS.md).
 --   * Gets read one row: the cron-rendered `snapshots.hostfile`. Only if it is
 --     missing or stale does a request scan `hubs` and `caches`, and it then
 --     writes the snapshot back, so the next requests read it again.
@@ -57,9 +58,11 @@ CREATE TABLE clients_seen (
 
 -- Hourly request counters, sampled: one request in 8 adds 8
 -- (gwc_core::counters). `kind` is the closed set gwc_core::counters::Kind.
+-- The health kinds `d1_error` and `degraded` are exact counts, flushed from
+-- isolate memory (gwc_core::health), and are not requests.
 CREATE TABLE request_log (
   hour     INTEGER NOT NULL CHECK (hour >= 0), -- unix seconds / 3600
-  kind     TEXT    NOT NULL CHECK (kind IN ('ping', 'hostfile', 'urlfile', 'update', 'other_net', 'limited', 'denied', 'error')),
+  kind     TEXT    NOT NULL CHECK (kind IN ('ping', 'hostfile', 'urlfile', 'update', 'other_net', 'limited', 'denied', 'error', 'd1_error', 'degraded')),
   client   TEXT    NOT NULL CHECK (length(client) BETWEEN 1 AND 4),  -- '-' when absent
   version  TEXT    NOT NULL CHECK (length(version) BETWEEN 1 AND 16), -- '-' when absent
   scheme   TEXT    NOT NULL CHECK (scheme IN ('http', 'https')),
@@ -78,9 +81,10 @@ INSERT INTO counts (k, n) VALUES ('hubs', 0), ('hubs_unverified', 0), ('caches',
 
 -- Documents rendered by cron; the request path reads one row.
 --   hostfile: gwc_core::snapshot::Snapshot, every cron run
---   stats:    gwc_core::stats::Stats as JSON, hourly
+--   cron:     gwc_core::stats::CronSummary as JSON, every cron run
+--   stats:    gwc_core::stats::Hourly as JSON, hourly
 CREATE TABLE snapshots (
-  k            TEXT    NOT NULL PRIMARY KEY CHECK (k IN ('hostfile', 'stats')),
+  k            TEXT    NOT NULL PRIMARY KEY CHECK (k IN ('hostfile', 'stats', 'cron')),
   rendered_at  INTEGER NOT NULL CHECK (rendered_at >= 0),
   body         TEXT    NOT NULL
 ) STRICT, WITHOUT ROWID;

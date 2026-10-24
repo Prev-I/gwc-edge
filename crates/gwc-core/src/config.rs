@@ -13,7 +13,7 @@ pub const MAX_COUNT: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// This cache's canonical public URL, as clients store it.
-    pub self_url: CacheUrl,
+    pub canonical_url: CacheUrl,
     /// Hosts per hostfile reply, `1..=MAX_COUNT`.
     pub hostfile_count: usize,
     /// Caches per urlfile reply, `1..=MAX_COUNT`.
@@ -25,10 +25,10 @@ pub struct Config {
 /// Why the configuration is unusable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    /// `SELF_URL` is missing.
-    MissingSelfUrl,
-    /// `SELF_URL` is not a URL Shareaza can use (it must be plain `http://`).
-    BadSelfUrl(String),
+    /// `CANONICAL_URL` is missing.
+    MissingCanonicalUrl,
+    /// `CANONICAL_URL` is not a URL Shareaza can use (it must be plain `http://`).
+    BadCanonicalUrl(String),
 }
 
 impl Config {
@@ -36,7 +36,7 @@ impl Config {
     ///
     /// | Variable | Default |
     /// |---|---|
-    /// | `SELF_URL` | required |
+    /// | `CANONICAL_URL` | required |
     /// | `HOSTFILE_COUNT` | 20, clamped to 1..=50 |
     /// | `URLFILE_COUNT` | 20, clamped to 1..=50 |
     /// | `CLIENT_DENYLIST` | `CRUX` |
@@ -45,17 +45,17 @@ impl Config {
     ///
     /// See [`ConfigError`]. Unparsable counts fall back to the default.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
-        let raw = var("SELF_URL")
+        let raw = var("CANONICAL_URL")
             .filter(|v| !v.trim().is_empty())
-            .ok_or(ConfigError::MissingSelfUrl)?;
-        let self_url = normalize(&raw).map_err(|_| ConfigError::BadSelfUrl(raw.clone()))?;
+            .ok_or(ConfigError::MissingCanonicalUrl)?;
+        let canonical = normalize(&raw).map_err(|_| ConfigError::BadCanonicalUrl(raw.clone()))?;
         let count = |name| {
             var(name)
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .map_or(DEFAULT_COUNT, |n| n.clamp(1, MAX_COUNT))
         };
         Ok(Config {
-            self_url,
+            canonical_url: canonical,
             hostfile_count: count("HOSTFILE_COUNT"),
             urlfile_count: count("URLFILE_COUNT"),
             denylist: var("CLIENT_DENYLIST").map_or_else(
@@ -82,8 +82,8 @@ mod tests {
 
     #[test]
     fn defaults() {
-        let c = Config::from_vars(vars(&[("SELF_URL", "http://gwc.example.org/")])).unwrap();
-        assert_eq!(c.self_url.url, "http://gwc.example.org/");
+        let c = Config::from_vars(vars(&[("CANONICAL_URL", "http://gwc.example.org/")])).unwrap();
+        assert_eq!(c.canonical_url.url, "http://gwc.example.org/");
         assert_eq!((c.hostfile_count, c.urlfile_count), (20, 20));
         assert_eq!(c.denylist, ["CRUX"]);
     }
@@ -91,14 +91,14 @@ mod tests {
     #[test]
     fn counts_are_clamped_and_garbage_ignored() {
         let c = Config::from_vars(vars(&[
-            ("SELF_URL", "http://gwc.example.org/"),
+            ("CANONICAL_URL", "http://gwc.example.org/"),
             ("HOSTFILE_COUNT", "500"),
             ("URLFILE_COUNT", "0"),
         ]))
         .unwrap();
         assert_eq!((c.hostfile_count, c.urlfile_count), (MAX_COUNT, 1));
         let c = Config::from_vars(vars(&[
-            ("SELF_URL", "http://gwc.example.org/"),
+            ("CANONICAL_URL", "http://gwc.example.org/"),
             ("HOSTFILE_COUNT", "lots"),
             ("URLFILE_COUNT", " 7 "),
         ]))
@@ -109,13 +109,13 @@ mod tests {
     #[test]
     fn denylist_can_be_replaced_or_emptied() {
         let c = Config::from_vars(vars(&[
-            ("SELF_URL", "http://gwc.example.org/"),
+            ("CANONICAL_URL", "http://gwc.example.org/"),
             ("CLIENT_DENYLIST", "crux, foxy"),
         ]))
         .unwrap();
         assert_eq!(c.denylist, ["CRUX", "FOXY"]);
         let c = Config::from_vars(vars(&[
-            ("SELF_URL", "http://gwc.example.org/"),
+            ("CANONICAL_URL", "http://gwc.example.org/"),
             ("CLIENT_DENYLIST", ""),
         ]))
         .unwrap();
@@ -124,31 +124,33 @@ mod tests {
 
     #[test]
     fn the_shipped_wrangler_config_is_valid() {
-        // A bad SELF_URL fails every request; catch it before a deploy does.
+        // A bad CANONICAL_URL fails every request; catch it before a deploy does.
         let cfg = include_str!("../../../wrangler.jsonc");
         let value = cfg
-            .split("\"SELF_URL\": \"")
+            .split("\"CANONICAL_URL\": \"")
             .nth(1)
             .and_then(|rest| rest.split('"').next())
-            .expect("SELF_URL in wrangler.jsonc");
-        let c = Config::from_vars(vars(&[("SELF_URL", value)])).unwrap();
+            .expect("CANONICAL_URL in wrangler.jsonc");
+        let c = Config::from_vars(vars(&[("CANONICAL_URL", value)])).unwrap();
         assert_eq!(
-            c.self_url.url, value,
-            "SELF_URL must already be in normalised form"
+            c.canonical_url.url, value,
+            "CANONICAL_URL must already be in normalised form"
         );
     }
 
     #[test]
-    fn self_url_is_required_and_must_be_plain_http() {
+    fn canonical_url_is_required_and_must_be_plain_http() {
         assert_eq!(
             Config::from_vars(vars(&[])),
-            Err(ConfigError::MissingSelfUrl)
+            Err(ConfigError::MissingCanonicalUrl)
         );
         assert_eq!(
-            Config::from_vars(vars(&[("SELF_URL", "https://gwc.example.org/")])),
-            Err(ConfigError::BadSelfUrl("https://gwc.example.org/".into()))
+            Config::from_vars(vars(&[("CANONICAL_URL", "https://gwc.example.org/")])),
+            Err(ConfigError::BadCanonicalUrl(
+                "https://gwc.example.org/".into()
+            ))
         );
-        let c = Config::from_vars(vars(&[("SELF_URL", "HTTP://GWC.Example.org")])).unwrap();
-        assert_eq!(c.self_url.url, "http://gwc.example.org/", "normalised");
+        let c = Config::from_vars(vars(&[("CANONICAL_URL", "HTTP://GWC.Example.org")])).unwrap();
+        assert_eq!(c.canonical_url.url, "http://gwc.example.org/", "normalised");
     }
 }

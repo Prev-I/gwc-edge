@@ -27,11 +27,29 @@ pub enum Kind {
     Denied,
     /// The query could not be parsed.
     Error,
+    /// Health event, not a request: a D1 call failed.
+    D1Error,
+    /// Health event, not a request: a reply was served in degraded mode.
+    Degraded,
 }
 
 impl Kind {
     /// Every kind, in the order the CHECK constraint lists them.
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 10] = [
+        Kind::Ping,
+        Kind::Hostfile,
+        Kind::Urlfile,
+        Kind::Update,
+        Kind::OtherNet,
+        Kind::Limited,
+        Kind::Denied,
+        Kind::Error,
+        Kind::D1Error,
+        Kind::Degraded,
+    ];
+
+    /// The kinds that are requests, as `/stats` counts them.
+    pub const REQUESTS: [Kind; 8] = [
         Kind::Ping,
         Kind::Hostfile,
         Kind::Urlfile,
@@ -41,6 +59,15 @@ impl Kind {
         Kind::Denied,
         Kind::Error,
     ];
+
+    /// Health events, recorded exactly (not sampled) by `crate::health`.
+    pub const HEALTH: [Kind; 2] = [Kind::D1Error, Kind::Degraded];
+
+    /// Whether this kind counts as a request.
+    #[must_use]
+    pub fn is_request(self) -> bool {
+        !Kind::HEALTH.contains(&self)
+    }
 
     /// Column value.
     #[must_use]
@@ -54,6 +81,8 @@ impl Kind {
             Kind::Limited => "limited",
             Kind::Denied => "denied",
             Kind::Error => "error",
+            Kind::D1Error => "d1_error",
+            Kind::Degraded => "degraded",
         }
     }
 
@@ -147,13 +176,27 @@ mod tests {
                 "other_net",
                 "limited",
                 "denied",
-                "error"
+                "error",
+                "d1_error",
+                "degraded"
             ]
         );
         for k in Kind::ALL {
             assert_eq!(Kind::parse(k.as_str()), Some(k));
         }
         assert_eq!(Kind::parse("stats"), None);
+    }
+
+    #[test]
+    fn health_kinds_are_not_requests() {
+        assert_eq!(Kind::REQUESTS.len() + Kind::HEALTH.len(), Kind::ALL.len());
+        for k in Kind::HEALTH {
+            assert!(!k.is_request(), "{k:?}");
+            assert!(!Kind::REQUESTS.contains(&k));
+        }
+        for k in Kind::REQUESTS {
+            assert!(k.is_request(), "{k:?}");
+        }
     }
 
     #[test]

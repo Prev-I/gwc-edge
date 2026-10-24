@@ -13,9 +13,13 @@ pub mod cache_url;
 pub mod config;
 pub mod counters;
 pub mod handshake;
+pub mod health;
+pub mod landing;
+pub mod log;
 pub mod policy;
 pub mod query;
 pub mod response;
+pub mod route;
 pub mod snapshot;
 pub mod stats;
 
