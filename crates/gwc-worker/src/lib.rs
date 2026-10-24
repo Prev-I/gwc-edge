@@ -55,6 +55,7 @@ struct Done {
     caches_sent: usize,
     snapshot: Option<&'static str>,
     update: Option<String>,
+    rate_limit: Option<&'static str>,
     /// The sampled request counter to record, for GWC requests.
     count: Option<Key>,
 }
@@ -70,6 +71,7 @@ impl Done {
             hosts_sent: 0,
             caches_sent: 0,
             snapshot: None,
+            rate_limit: None,
             update: None,
             count: None,
         }
@@ -160,6 +162,7 @@ async fn dispatch(
                 hosts_sent: a.hosts_sent,
                 caches_sent: a.caches_sent,
                 snapshot: a.snapshot,
+                rate_limit: a.rate_limit,
                 update: a.update,
                 count: Some(a.key),
             }
@@ -243,6 +246,7 @@ fn finish(
         cf_colo: colo,
         snapshot: done.snapshot,
         update: done.update.as_deref(),
+        rate_limit: done.rate_limit,
     };
     console_log!("{}", line.to_json());
     if done.outcome == Outcome::Degraded {

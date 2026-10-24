@@ -25,11 +25,22 @@ pub const GET_LIMITER: &str = "GET_LIMITER";
 /// anyway (`gwc_core::update::COALESCE`).
 pub const UPDATE_LIMITER: &str = "UPDATE_LIMITER";
 
+/// What the limiter said about a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Allowed,
+    Limited,
+    /// The binding is missing or failed: the request is let through
+    /// (fail-open), and its log line says so (`rate_limit: "unavailable"`).
+    Unchecked,
+}
+
 /// Whether this request may proceed. Fail-open: a missing or failing binding
-/// allows it, with one warning per isolate (not per request, which would
-/// double the log volume). The warning names the binding only: the error
-/// text is not logged, since the key it was called with holds the address.
-pub async fn allowed(env: &Env, source: &str, kind: RateKind) -> bool {
+/// allows it. Every such request is marked in its own log line, and the
+/// first one in an isolate also logs one warning naming the binding: not
+/// one per request, which would double the log volume. Neither carries the
+/// error text, since the key the binding was called with holds the address.
+pub async fn admit(env: &Env, source: &str, kind: RateKind) -> Admission {
     let binding = match kind {
         RateKind::Update => UPDATE_LIMITER,
         RateKind::Hostfile | RateKind::Urlfile => GET_LIMITER,
@@ -39,7 +50,11 @@ pub async fn allowed(env: &Env, source: &str, kind: RateKind) -> bool {
         Err(e) => Err(e),
     };
     if let Ok(o) = outcome {
-        return o.success;
+        return if o.success {
+            Admission::Allowed
+        } else {
+            Admission::Limited
+        };
     }
     if !WARNED.with(|w| w.replace(true)) {
         console_warn!(
@@ -47,5 +62,5 @@ pub async fn allowed(env: &Env, source: &str, kind: RateKind) -> bool {
             serde_json::json!({"level": "warn", "event": "rate_limiter_unavailable", "binding": binding})
         );
     }
-    true
+    Admission::Unchecked
 }

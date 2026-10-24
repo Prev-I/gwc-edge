@@ -37,6 +37,7 @@ In the dashboard: Workers & Pages → gwc-edge → Observability → Events. Fil
 | `client`, `version` | From the query; `-` when absent. |
 | `scheme` | `http` or `https`. |
 | `outcome` | `ok`, `rate_limited` (over a per-source limit: kind `limited`), `denied`, `degraded`, `malformed`. |
+| `rate_limit` | Only `unavailable`, and only on a request that should have been rate limited but was let through because the Rate Limiting binding was missing or failed (fail-open, ADR-0005). Absent otherwise. |
 | `hosts_sent`, `caches_sent` | `h|` lines, and `u|` lines other than the cache's own. |
 | `d1_ms` | Time spent waiting on D1. |
 | `cf_colo` | Cloudflare data centre. |
@@ -52,7 +53,7 @@ No line carries the requester's address.
 - `{"level":"warn","event":"rows_dropped",…}`: rows that could not be decoded were skipped.
 - `{"level":"warn","event":"snapshot_unparsable",…}`: a stored document this build cannot read; the cron re-renders the stats part on its next run.
 - `{"level":"warn","event":"count_rows_written",…}`: a counter write billed other than 1 row (the budget assumes 1).
-- `{"level":"warn","event":"rate_limiter_unavailable",…}`: the Rate Limiting binding failed; requests are allowed (fail-open). Logged once per isolate, so a binding that recovers and fails again later in the same isolate is not reported twice.
+- `{"level":"warn","event":"rate_limiter_unavailable",…}`: the Rate Limiting binding failed; requests are allowed (fail-open). Logged once per isolate, naming the binding, so it does not say how long the failure lasted: count the request lines with `rate_limit: "unavailable"` for that.
 - `{"kind":"cron",…}`: one per cron run (ADR-0012). Fields:
   `picked` (hubs picked for a handshake), `verified`, `alive_full`, `dead` (verdicts),
   `deleted` (failed `X-Try-Hubs` candidates), `candidates_added`, `purged`
@@ -155,6 +156,33 @@ two failed handshakes in a row, 10 minutes apart.
 - A `503` with `Shielded leaf node`, `Need an Ultrapeer`, `Ultrapeer
   disabled` or `Wrong Protocol` means it is not a hub; `timeout` or
   `unreachable` usually means a firewall or a host that went away.
+
+**Rate limiter unavailable, or limits exceeded.** The Rate Limiting binding
+is approximate: Cloudflare counts per location ("local to the Cloudflare
+location that your Worker runs in"), eventually consistent across
+instances, and a client can exceed the limit before the counts converge.
+Traffic spread over many locations, or many source addresses, is not held
+to the configured rates. When the binding is missing or fails, every
+request is let through (fail-open, ADR-0005): rejecting Shareaza's requests
+would cost the cache its place in their lists (ADR-0002).
+- Symptom: request lines with `rate_limit: "unavailable"`, one
+  `rate_limiter_unavailable` warning per isolate; or, with the binding
+  working, a rising request count from few clients with no `limited` lines.
+- What it can cost, with no limiter at all:
+  - **Gets** read the snapshot, 0 or 1 row each, and write nothing but the
+    sampled counter. The 100,000 requests a day are the binding limit, well
+    before the 5 million rows read.
+  - **Updates** stay bounded by what the write path allows regardless of the
+    limiter: one write per hub per 30 minutes (coalescing), new hubs only
+    from their own address and only up to 500 live, caches up to 50 and 3 per
+    host (ADR-0006, ADR-0010, ADR-0012). An attacker with many addresses can
+    still spend writes faster than with the limiter.
+- Check: Workers Logs, filtered on `rate_limit`; the D1 dashboard's rows
+  written per day; `/stats` `requests.by_kind` and `limited`.
+- Fix: a missing binding is a deployment fault (the rendered
+  `wrangler.deploy.json` lists `ratelimits`); redeploy. For abuse from a few
+  vendors, `CLIENT_DENYLIST`. A strict global limit would need a Durable
+  Object, which this design deliberately avoids.
 
 **Verification failing on D1.** The `cron` line says
 `verification_failed: true`, after a `d1_error` line naming `cron_queue` or

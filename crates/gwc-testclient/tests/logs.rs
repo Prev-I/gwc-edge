@@ -136,6 +136,10 @@ fn one_json_line_per_request_on_every_path() {
         lines[2]["caches_sent"], 1,
         "dkac, the cache's own line not counted"
     );
+    assert!(
+        lines.iter().all(|l| l.get("rate_limit").is_none()),
+        "the bindings answer here: no request is marked unchecked"
+    );
 }
 
 #[test]
