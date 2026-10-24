@@ -48,6 +48,42 @@ pub enum Verdict {
     Dead,
 }
 
+/// How one handshake attempt ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exchange {
+    /// The hub's full header block.
+    Reply(Reply),
+    /// Refused, reset, or not connectable at all.
+    Unreachable,
+    /// No complete reply before the deadline.
+    Timeout,
+    /// Closed before the header block ended: what a banned address gets
+    /// (`ShakeNeighbour.cpp:1024-1026`).
+    Closed,
+    /// Not a Gnutella reply, or longer than [`MAX_REPLY`].
+    Invalid,
+}
+
+impl Exchange {
+    /// Only a reply can vouch for a hub; every other ending is [`Verdict::Dead`].
+    #[must_use]
+    pub fn verdict(&self) -> Verdict {
+        match self {
+            Exchange::Reply(r) => r.verdict(),
+            _ => Verdict::Dead,
+        }
+    }
+
+    /// The `X-Try-Hubs` entries of the reply, if there was one.
+    #[must_use]
+    pub fn try_hubs(&self) -> Vec<(SocketAddrV4, Option<u64>)> {
+        match self {
+            Exchange::Reply(r) => r.try_hubs(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// A parsed reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
@@ -323,6 +359,28 @@ mod tests {
         X-Ultrapeer: True\r\n\
         X-Try-Hubs: 9.9.9.9:6346 2026-10-23T08:30Z,1.0.0.1:6347 2026-10-22T23:59Z\r\n\
         \r\n";
+
+    #[test]
+    fn only_a_reply_can_vouch_for_a_hub() {
+        assert_eq!(
+            Exchange::Reply(done(SHAREAZA_200)).verdict(),
+            Verdict::Verified
+        );
+        assert_eq!(
+            Exchange::Reply(done(SHAREAZA_503_FULL)).verdict(),
+            Verdict::AliveFull
+        );
+        for failed in [
+            Exchange::Unreachable,
+            Exchange::Timeout,
+            Exchange::Closed,
+            Exchange::Invalid,
+        ] {
+            assert_eq!(failed.verdict(), Verdict::Dead, "{failed:?}");
+            assert_eq!(failed.try_hubs(), []);
+        }
+        assert_eq!(Exchange::Reply(done(SHAREAZA_503_FULL)).try_hubs().len(), 2);
+    }
 
     #[test]
     fn connect_request_is_a_g2_leaf_handshake() {

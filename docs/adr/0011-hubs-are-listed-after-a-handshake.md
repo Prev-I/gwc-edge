@@ -2,7 +2,10 @@
 
 **Status:** accepted, 2026-10-24, after an expert review requested by the
 reviewer. Supersedes ADR-0010's "listed at once" and "on the same port"
-clauses, and amends ADR-0006's `unverified` cap.
+clauses, and amends ADR-0006's `unverified` cap. Amended by ADR-0012: a
+`dead` row is not requeued as `unverified` by its own update (it stays
+`dead` until a handshake succeeds), a requeue never resets `failures`, and
+the open questions below are settled there.
 
 ## Context
 A self-registered hub was listed at once, and a get serves the 20 most

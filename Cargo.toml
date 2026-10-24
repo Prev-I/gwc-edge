@@ -16,6 +16,10 @@ worker = { version = "=0.8.7", features = ["d1"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 console_error_panic_hook = "=0.1.7"
+# Already in the tree through `worker`: its Socket implements tokio's
+# AsyncRead/AsyncWrite, and the cron runs handshakes concurrently.
+tokio = { version = "=1.54.1", default-features = false }
+futures-util = { version = "=0.3.34", default-features = false, features = ["alloc"] }
 proptest = "=1.12.0"
 # No TLS, no gzip: Shareaza speaks plain HTTP and sends no Accept-Encoding.
 ureq = { version = "=3.5.0", default-features = false }

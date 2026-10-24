@@ -22,10 +22,11 @@ use crate::query::{Net, Query};
 /// Shareaza updates a cache at most hourly, so every real refresh still lands.
 pub const COALESCE: u64 = 30 * 60;
 
-/// Most hub rows kept.
+/// Most live (not `dead`) hub rows kept. `dead` rows are bounded by the
+/// cron instead (`verify::DEAD_MAX`, ADR-0012).
 pub const MAX_HUBS: u64 = 500;
 
-/// Most `unverified` hub rows (from `X-Try-Hubs`), within [`MAX_HUBS`].
+/// Most `unverified` `X-Try-Hubs` candidates, within [`MAX_HUBS`].
 pub const MAX_UNVERIFIED: u64 = 150;
 
 /// Most cache rows kept.
@@ -160,12 +161,14 @@ pub struct HubRow {
     pub status: String,
     pub source: String,
     pub last_seen: u64,
+    pub last_checked: Option<u64>,
+    pub failures: u64,
 }
 
 /// What to do with a hub claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubPlan {
-    /// A new row, `unverified`, source `update`, and `counts.hubs + 1`.
+    /// A new row, `unverified`, source `update`, and `counts.hubs_live + 1`.
     Insert,
     /// A servable hub on the same port: fields and `last_seen = now`; status
     /// and failures unchanged.
@@ -173,10 +176,18 @@ pub enum HubPlan {
     /// A servable hub on a new port: the new port, status `unverified`, until
     /// the cron has checked it.
     Demote,
-    /// An `unverified` or `dead` row: the claim's port and fields, status
-    /// `unverified`, source `update`, queued for the cron. `was_try_hubs`
-    /// also means `counts.hubs_unverified - 1`: it leaves the candidates' cap.
+    /// An `unverified` row: the claim's port and fields, source `update`,
+    /// still queued for the cron; `failures` kept. `was_try_hubs` also means
+    /// `counts.hubs_unverified - 1`: it leaves the candidates' cap.
     Requeue { was_try_hubs: bool },
+    /// A `dead` row past its backoff: the claim's port and fields and
+    /// `last_seen = now`, which queues it for a check; it stays `dead`, out
+    /// of the cap, with its failures, until a handshake succeeds (ADR-0012).
+    Reregister,
+    /// A `dead` row still within its backoff: nothing to write.
+    BackingOff,
+    /// A `dead` row already waiting for the cron: nothing to write.
+    Queued,
     /// Refreshed less than [`COALESCE`] ago: nothing to write.
     Coalesced,
     /// No room for a new hub.
@@ -192,17 +203,20 @@ impl HubPlan {
             HubPlan::Refresh => "refreshed",
             HubPlan::Demote => "demoted",
             HubPlan::Requeue { .. } => "requeued",
+            HubPlan::Reregister => "reregistered",
+            HubPlan::BackingOff => "backoff",
+            HubPlan::Queued => "queued",
             HubPlan::Coalesced => "coalesced",
             HubPlan::Full => "full",
         }
     }
 }
 
-/// Plan a hub claim against its stored row (if any) and the hub count.
+/// Plan a hub claim against its stored row (if any) and the live hub count.
 #[must_use]
-pub fn plan_hub(existing: Option<&HubRow>, claim: &HubClaim, now: u64, hubs: u64) -> HubPlan {
+pub fn plan_hub(existing: Option<&HubRow>, claim: &HubClaim, now: u64, live: u64) -> HubPlan {
     let Some(row) = existing else {
-        return if hubs >= MAX_HUBS {
+        return if live >= MAX_HUBS {
             HubPlan::Full
         } else {
             HubPlan::Insert
@@ -214,10 +228,20 @@ pub fn plan_hub(existing: Option<&HubRow>, claim: &HubClaim, now: u64, hubs: u64
     match row.status.as_str() {
         "verified" | "alive_full" if row.port == claim.addr.port() => HubPlan::Refresh,
         "verified" | "alive_full" => HubPlan::Demote,
-        // Only an `unverified` candidate is in the X-Try-Hubs cap; a `dead`
-        // one already left it.
+        "dead" => match row.last_checked {
+            // Registered again since its last check, or never checked: the
+            // cron already has it.
+            Some(checked) if row.last_seen <= checked => {
+                if now < checked.saturating_add(crate::verify::backoff(row.failures)) {
+                    HubPlan::BackingOff
+                } else {
+                    HubPlan::Reregister
+                }
+            }
+            _ => HubPlan::Queued,
+        },
         _ => HubPlan::Requeue {
-            was_try_hubs: row.status == "unverified" && row.source == "try_hubs",
+            was_try_hubs: row.source == "try_hubs",
         },
     }
 }
@@ -342,6 +366,22 @@ mod tests {
     }
 
     #[test]
+    fn updates_without_net_are_declined_as_gnutella() {
+        let q = parse(
+            "ip=8.8.4.4:6346&url=http%3A%2F%2Fgwc.example.net%2F&update=1&client=RAZA&version=2.4",
+        )
+        .unwrap();
+        assert_eq!(
+            ip_claim(&q, "8.8.4.4", NOW),
+            Some(Err(IpDecline::NotGnutella2))
+        );
+        assert_eq!(
+            url_claim(&q, &canonical()),
+            Some(Err(UrlDecline::NotGnutella2))
+        );
+    }
+
+    #[test]
     fn no_ip_part_no_claim() {
         let q = parse("url=http%3A%2F%2Fgwc.example.net%2F&update=1&client=RAZA").unwrap();
         assert_eq!(ip_claim(&q, "8.8.4.4", NOW), None);
@@ -350,7 +390,7 @@ mod tests {
     #[test]
     fn out_of_schema_counters_are_dropped_not_fatal() {
         let q = parse(
-            "ip=8.8.4.4:6346&x.leaves=70000&x.max=99999&uptime=4000000000&update=1&client=RAZA",
+            "ip=8.8.4.4:6346&x.leaves=70000&x.max=99999&uptime=4000000000&update=1&net=gnutella2&client=RAZA",
         )
         .unwrap();
         let c = ip_claim(&q, "8.8.4.4", NOW).unwrap().unwrap();
@@ -420,13 +460,15 @@ mod tests {
             status: status.into(),
             source: source.into(),
             last_seen,
+            last_checked: None,
+            failures: 0,
         }
     }
 
     #[test]
-    fn new_hubs_are_inserted_unverified_until_the_cap() {
+    fn new_hubs_are_inserted_unverified_until_the_live_cap() {
         // ADR-0011: the update path never lists a hub; the cron promotes it
-        // after a successful handshake.
+        // after a successful handshake. ADR-0012: only live rows fill the cap.
         assert_eq!(plan_hub(None, &claim(), NOW, 0), HubPlan::Insert);
         assert_eq!(plan_hub(None, &claim(), NOW, MAX_HUBS - 1), HubPlan::Insert);
         assert_eq!(plan_hub(None, &claim(), NOW, MAX_HUBS), HubPlan::Full);
@@ -487,41 +529,17 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_or_unverified_hub_is_requeued_for_the_cron() {
+    fn an_unverified_hub_is_requeued_for_the_cron() {
         let c = claim();
-        assert_eq!(
-            plan_hub(
-                Some(&row(6346, "dead", "update", NOW - COALESCE)),
-                &c,
-                NOW,
-                MAX_HUBS
-            ),
-            HubPlan::Requeue {
-                was_try_hubs: false
-            },
-            "existing rows are requeued even at the cap"
-        );
         assert_eq!(
             plan_hub(
                 Some(&row(6347, "unverified", "try_hubs", NOW - COALESCE)),
                 &c,
                 NOW,
-                10
+                MAX_HUBS
             ),
             HubPlan::Requeue { was_try_hubs: true },
-            "a candidate that registers itself leaves the X-Try-Hubs cap"
-        );
-        assert_eq!(
-            plan_hub(
-                Some(&row(6346, "dead", "try_hubs", NOW - COALESCE)),
-                &c,
-                NOW,
-                10
-            ),
-            HubPlan::Requeue {
-                was_try_hubs: false
-            },
-            "a dead candidate is no longer in that cap"
+            "a candidate that registers itself leaves the X-Try-Hubs cap, even at the cap"
         );
         assert_eq!(
             plan_hub(
@@ -536,6 +554,53 @@ mod tests {
         );
     }
 
+    fn dead(failures: u64, last_checked: u64, last_seen: u64) -> HubRow {
+        HubRow {
+            failures,
+            last_checked: Some(last_checked),
+            ..row(6346, "dead", "update", last_seen)
+        }
+    }
+
+    #[test]
+    fn a_dead_hub_registering_again_stays_dead_and_waits_for_its_backoff() {
+        // ADR-0012: a dead row never re-enters the cap from a request, and
+        // registering again does not reset its failures.
+        let c = claim();
+        let checked = NOW - 3_000; // three failures: backoff 2 400 s, elapsed
+        assert_eq!(
+            plan_hub(Some(&dead(3, checked, checked - 100)), &c, NOW, MAX_HUBS),
+            HubPlan::Reregister,
+            "after its backoff, and even at the cap"
+        );
+        assert_eq!(
+            plan_hub(Some(&dead(4, checked, checked - 100)), &c, NOW, 10),
+            HubPlan::BackingOff,
+            "four failures: 4 800 s, not yet"
+        );
+        assert_eq!(
+            plan_hub(Some(&dead(1, NOW - 7_200, NOW - 3_600)), &c, NOW, 10),
+            HubPlan::Queued,
+            "registered again since its last check: already waiting for the cron"
+        );
+        assert_eq!(
+            plan_hub(
+                Some(&HubRow {
+                    last_checked: None,
+                    ..row(6346, "dead", "seed", NOW - 7_200)
+                }),
+                &c,
+                NOW,
+                10
+            ),
+            HubPlan::Queued,
+            "never checked: the cron has it"
+        );
+        let mut try_hubs = dead(1, NOW - 7_200, NOW - 7_300);
+        try_hubs.source = "try_hubs".into();
+        assert_eq!(plan_hub(Some(&try_hubs), &c, NOW, 10), HubPlan::Reregister);
+    }
+
     #[test]
     fn outcome_labels_are_stable_and_ip_free() {
         assert_eq!(IpDecline::SourceMismatch.as_str(), "source_mismatch");
@@ -545,6 +610,9 @@ mod tests {
         assert_eq!(HubPlan::Demote.as_str(), "demoted");
         assert_eq!(HubPlan::Requeue { was_try_hubs: true }.as_str(), "requeued");
         assert_eq!(HubPlan::Coalesced.as_str(), "coalesced");
+        assert_eq!(HubPlan::Reregister.as_str(), "reregistered");
+        assert_eq!(HubPlan::BackingOff.as_str(), "backoff");
+        assert_eq!(HubPlan::Queued.as_str(), "queued");
         assert_eq!(CachePlan::DomainFull.as_str(), "domain_full");
         for label in [
             IpDecline::NotGnutella2.as_str(),

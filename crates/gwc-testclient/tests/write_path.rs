@@ -6,7 +6,8 @@
 //! Hubs and caches here use addresses no other test touches. `/__scheduled`
 //! runs the cron on demand (`wrangler dev --test-scheduled`). A self-registered
 //! hub is stored `unverified` and listed only after a successful handshake
-//! (ADR-0011); the verifying cron and its end-to-end test come next.
+//! (ADR-0011). `TEST_DIAL` maps 4.2.2.1 to a fake hub that accepts; every
+//! other hub here is blocked, so it fails its check (`tests/verify.rs`).
 
 use gwc_testclient::logs::{is_request_line, len, settle};
 use gwc_testclient::{Client, Reply};
@@ -59,18 +60,17 @@ fn ok_reply(r: &Reply) {
 
 #[test]
 #[ignore = "needs a running cache: scripts/integration.sh"]
-fn shareaza_session_stores_the_hub_unverified_until_a_handshake() {
-    // One hub, one address, as a real Shareaza hub would talk to the cache:
-    // ping → get → update → get. Since ADR-0011 the update stores the hub
-    // `unverified`; it is listed only after the cron's first successful
-    // handshake, which the verifying cron adds (with a fake hub to answer it).
+fn shareaza_session_lists_the_hub_after_its_handshake() {
+    // The definition of done: one hub, one address, as a real Shareaza hub
+    // talks to the cache: ping → get → update → get. The update stores the
+    // hub `unverified` (ADR-0011); the cron's handshake, answered by the fake
+    // hub, lists it.
     let log = std::env::var("GWC_LOG_FILE").expect("GWC_LOG_FILE");
     let c = client();
     let hub = "4.2.2.1:6346";
     let me = [("CF-Connecting-IP", "4.2.2.1")];
     let hostfile = "?get=1&hostfile=1&net=gnutella2&ping=1&pv=4&client=RAZA2.7.10.6\
         &getleaves=1&getnetworks=1&getclusters=0&getvendors=1&getuptime=1";
-    let unverified = fresh_stats(&c)["hubs"]["unverified"].as_u64().unwrap();
     let from = len(&log);
 
     // 1. ping
@@ -92,20 +92,26 @@ fn shareaza_session_stores_the_hub_unverified_until_a_handshake() {
         Some("http://session.example.net/gwc/"),
     ));
 
-    // 4. get, after a cron run: stored, but not served before a handshake
+    // 4. not served before the cron has checked it (asked by another client:
+    //    the hub's own gets are limited to 2 a minute)
+    let waiting = c.hostfile();
+    assert_eq!(listed(&waiting, hub), None, "not listed before a handshake");
+
+    // 5. the cron's handshake succeeds; the next get lists the hub, with the
+    //    fields its update reported
     cron(&c);
     let after = c.request("GET", hostfile, &me);
-    assert_eq!(listed(&after, hub), None, "not listed before a handshake");
+    let line = listed(&after, hub).expect("listed after its handshake");
+    let fields: Vec<&str> = line.split('|').collect();
+    assert_eq!(fields[3..], ["", "12", "RAZA", fields[6], "300"], "{line}");
     assert_eq!(after.lines().last().copied(), Some(self_line().as_str()));
-    assert_eq!(
-        stats(&c)["hubs"]["unverified"],
-        unverified + 1,
-        "stored, waiting for the cron"
-    );
 
-    let lines = settle(&log, from, 4, is_request_line);
+    let lines = settle(&log, from, 5, is_request_line);
     let kinds: Vec<&str> = lines.iter().map(|l| l["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds[..4], ["ping", "hostfile", "update", "hostfile"]);
+    assert_eq!(
+        kinds[..5],
+        ["ping", "hostfile", "update", "hostfile", "hostfile"]
+    );
     assert_eq!(lines[2]["update"], "ip:inserted url:inserted");
 }
 
@@ -150,7 +156,14 @@ fn private_low_port_and_g1_updates_are_answered_ok_and_not_stored() {
 #[ignore = "needs a running cache: scripts/integration.sh"]
 fn submitted_caches_are_pending_unlisted_and_capped_per_domain() {
     let c = client();
-    let pending = fresh_stats(&c)["caches"]["pending"].as_u64().unwrap();
+    // Stored, whatever the cron's pings (blocked here) made of them since.
+    let stored = |s: &serde_json::Value| {
+        ["pending", "failed", "verified"]
+            .iter()
+            .map(|k| s["caches"][k].as_u64().unwrap())
+            .sum::<u64>()
+    };
+    let before = stored(&fresh_stats(&c));
     for path in ["a", "b", "c", "d"] {
         ok_reply(&c.submit(&format!("http://caps.example.net/{path}/")));
     }
@@ -158,8 +171,8 @@ fn submitted_caches_are_pending_unlisted_and_capped_per_domain() {
     ok_reply(&c.submit(&std::env::var("GWC_CANONICAL_URL").unwrap()));
     cron(&c);
     assert_eq!(
-        stats(&c)["caches"]["pending"].as_u64().unwrap(),
-        pending + 3,
+        stored(&stats(&c)),
+        before + 3,
         "three per domain; https and this cache itself not stored"
     );
     let urls = c.urlfile();
@@ -238,14 +251,15 @@ fn a_second_update_within_a_minute_is_answered_ok_and_not_processed() {
 
 #[test]
 #[ignore = "needs a running cache: scripts/integration.sh"]
-fn seeded_hubs_coalesce_or_requeue_as_planned() {
+fn seeded_hubs_coalesce_or_back_off_as_planned() {
     let log = std::env::var("GWC_LOG_FILE").expect("GWC_LOG_FILE");
     let c = client();
     let from = len(&log);
     // 8.8.4.4 (verified, seen 120 s before seeding): refreshed within 30
     // minutes on the same port, so nothing is written.
     ok_reply(&c.update_from("8.8.4.4", "8.8.4.4:6346", 12, 7300, 300, None));
-    // 9.9.9.10 (dead) and 9.9.9.9 (unverified) register themselves.
+    // 9.9.9.9 failed its first check in the script's cron run; 9.9.9.10 was
+    // seeded dead, checked a minute before. Both register themselves.
     ok_reply(&c.update_from("9.9.9.10", "9.9.9.10:6346", 1, 7300, 300, None));
     ok_reply(&c.update_from("9.9.9.9", "9.9.9.9:6346", 1, 7300, 300, None));
     let lines = settle(&log, from, 3, is_request_line);
@@ -254,8 +268,9 @@ fn seeded_hubs_coalesce_or_requeue_as_planned() {
         .map(|l| l["update"].as_str().unwrap_or_default())
         .collect();
     // 8.8.4.4 and 9.9.9.9 were seen within 30 minutes: nothing written.
-    // 9.9.9.10 (dead, long gone) is queued again for the cron, unlisted.
-    assert_eq!(results, ["ip:coalesced", "ip:requeued", "ip:coalesced"]);
+    // 9.9.9.10 has failed 3 checks, the last a minute before seeding: it waits
+    // out its backoff, 40 minutes (ADR-0012).
+    assert_eq!(results, ["ip:coalesced", "ip:backoff", "ip:coalesced"]);
 
     cron(&c);
     let hosts = c.hostfile();
@@ -270,12 +285,8 @@ fn seeded_hubs_coalesce_or_requeue_as_planned() {
         age_8844 >= 120,
         "the coalesced refresh did not reset its age: {age_8844}"
     );
-    assert_eq!(
-        listed(&hosts, "9.9.9.10:6346"),
-        None,
-        "requeued, not served before a handshake"
-    );
-    assert_eq!(listed(&hosts, "9.9.9.9:6346"), None, "still unverified");
+    assert_eq!(listed(&hosts, "9.9.9.10:6346"), None, "dead, not served");
+    assert_eq!(listed(&hosts, "9.9.9.9:6346"), None, "dead, not served");
 }
 
 #[test]
@@ -305,12 +316,19 @@ fn pings_and_g1_gets_are_never_limited() {
 fn zz_no_log_line_carries_a_requester_address() {
     // Runs last (tests run in name order): every source address used by the
     // tests, set through CF-Connecting-IP, must be absent from both logs.
+    // A cron line may name a hub it checked when that hub is a listing
+    // (addendum C), so only that field is left out of the check.
     let logs = [
         std::env::var("GWC_LOG_FILE").expect("GWC_LOG_FILE"),
         std::env::var("GWC_DEGRADED_LOG_FILE").expect("GWC_DEGRADED_LOG_FILE"),
     ];
     for log in &logs {
-        for v in gwc_testclient::logs::json_since(log, 0) {
+        for mut v in gwc_testclient::logs::json_since(log, 0) {
+            if matches!(v["kind"].as_str(), Some("cron_hub" | "cron_trace"))
+                && let Some(line) = v.as_object_mut()
+            {
+                line.remove("ip");
+            }
             let text = v.to_string();
             for needle in [
                 "2001:db8",

@@ -16,6 +16,7 @@ pub mod handshake;
 pub mod health;
 pub mod landing;
 pub mod log;
+pub mod ping;
 pub mod policy;
 pub mod query;
 pub mod response;
@@ -23,6 +24,7 @@ pub mod route;
 pub mod snapshot;
 pub mod stats;
 pub mod update;
+pub mod verify;
 
 #[cfg(test)]
 mod shareaza_model;

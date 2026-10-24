@@ -356,8 +356,9 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
       `foxy`.
     - A field that fails is left empty, and trailing empty fields are dropped.
   - **Caches:** `u|url|age` lines.
-- **Any other network:** only the self line. There are no hosts (we have none
-  for G1), and no pong, which a G1 query treats as a failure (`DS:1641-1646`).
+- **Any other network**, including a request without `net` (Gnutella, the
+  GWC2 default): only the self line. There are no hosts (we have none for G1),
+  and no pong, which a G1 query treats as a failure (`DS:1641-1646`).
 - **A ping without a get** gets the pong on any network, so no allowed client
   ever receives an empty body. Shareaza never sends one: its G1 queries carry
   no ping, and its G2 pings always come with a get.
@@ -435,6 +436,32 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
     normalising them.
   - Continuation lines are appended rather than replacing the value.
   - Entries must pass the hub-address rules. At most 50 are kept.
+  - Taken only from replies judged `verified` or `alive_full`, and only
+    entries at most 24 h old, newest first, within the 150-candidate cap.
+- **When** (the verifying cron, every 10 minutes, ADR-0012): at most 16 hubs a
+  run, 5 at a time, 8 s each. New self-registrations come first; listed hubs
+  are checked again no sooner than 90 minutes after their last check, however
+  often they refresh (3 places a run are reserved for them); a `dead` hub
+  only after it registers again and its backoff (10 minutes, doubling per
+  failure, at most a day) has passed; candidates last.
+- **What a result does:** success lists the hub (`last_seen = now`,
+  `failures = 0`). A listed hub survives one failure and is retried 10
+  minutes later; two in a row make it `dead`. A self-registered hub that
+  fails its first check is `dead`; a failed candidate is deleted.
+
+**Cache verification** (`ping`, the same cron, ADR-0012):
+- **Request:** `GET <url>?ping=1&net=gnutella2&client=TEST&version=gwc-edge+<version>`,
+  `User-Agent: gwc-edge <version>`. A DNS name on port 80 is fetched; an
+  IP-literal host or another port gets plain HTTP/1.0 over a TCP socket,
+  because `fetch()` cannot reach IP addresses and does not reliably honour
+  other ports. Neither follows redirects: a cache that only answers through
+  a redirect is not verified, though Shareaza would follow it (WinINet,
+  `HR:253-257`).
+- **Pong:** HTTP `200` and a line `i|pong|<name>[|<networks>]` whose networks,
+  when present, include `gnutella2` (split on `-`).
+- **Result:** a pong makes the cache `verified` and served. A failure makes it
+  `failed` (not served, pinged again after an hour); three in a row delete it.
+  A verified cache is pinged again every 6 hours. At most 2 pings a run.
 
 ## What gwc-edge stores
 
@@ -449,17 +476,22 @@ by part (`gwc_core::update`, ADR-0010):
 - Hubs enter `hubs` with a source other than their own address only as
   `X-Try-Hubs` candidates found by the verifying cron: source `try_hubs`,
   status `unverified`, not served until a handshake succeeds.
-- At most 500 hubs and 50 caches. Of the hubs, at most 150 may be
-  `X-Try-Hubs` candidates awaiting a handshake; self-registered hubs awaiting
-  one count only against the 500.
+- At most 500 live (not `dead`) hubs and 50 caches. Of the hubs, at most 150
+  may be `X-Try-Hubs` candidates awaiting a handshake; self-registered hubs
+  awaiting one count only against the 500. `dead` hubs are kept outside that
+  cap, at most 1,000, and deleted after 48 h without being seen or checked
+  (ADR-0012).
 - A hub that reaches the cache over IPv6 while claiming its IPv4 is not
   stored: the addresses differ (ADR-0010).
 - `url=` on this cache's own host and port is never stored, whatever the path:
   every path there reaches this cache.
 - A hub's row is written at most once per 30 minutes by its own updates,
   whatever its status or port. After that, a listed hub on the same port is
-  refreshed; on a new port it returns to `unverified`; an `unverified` or
-  `dead` hub is queued again for the cron. Only the cron lists a hub.
+  refreshed; on a new port it returns to `unverified`; an `unverified` hub is
+  queued again for the cron. A `dead` hub stays `dead`: its update is written,
+  queueing it for a check, only once its backoff has passed and only if it is
+  not already queued. Only the cron lists a hub, and only a successful
+  handshake resets a hub's failures (ADR-0012).
 - Rate limits: 2 gets per 60 s per source and kind (hostfile and urlfile
   separately), 1 update per 60 s per source; over the limit the reply is the
   same, without data or storage.
@@ -482,7 +514,7 @@ The Status column uses these values:
   the row of [Deviations from the project brief](#deviations-from-the-project-brief)
   where one applies.
 - **not supported**: an optional feature we do not implement.
-- **open**: not yet decided.
+- **open**: not yet decided (none at present).
 
 ### GWC2 (v1.9.4), the specification implemented
 
@@ -510,7 +542,7 @@ The Status column uses these values:
 | URLs always begin with `http://`, in requests and responses (`GWC1 §2.2`, `GWC2 §Step 1`, `§Step 3`). | Only `http://` URLs are stored and served, and `CANONICAL_URL` must be one (see "Cache URLs"). | conforms |
 | Hosts are numerical `ip:port`, with no leading zeros (`GWC2 §Step 1`, `§Step 2`). | Only canonical dotted-quad IPv4 addresses are stored, so every `h\|` line is canonical (see "Hub addresses"). | conforms |
 | `net=<name>` selects a network. An unsupported one gets `I\|net-not-supported`, and its updates are kept as "redirect" URLs (`GWC2 §Extras: network`). | Only `gnutella2` is served. A get with any other `net` gets only the self line (a lone ping still gets the pong), with no `net-not-supported` line, and nothing is stored. Storing foreign-network URLs as redirects is not implemented (this cache serves G2 only). The `net-not-supported` line, which the clause requires, is omitted; Shareaza ignores unknown `i\|` lines, so adding it would change nothing for the oracle. | deviation |
-| Without `net`, Gnutella is implied to be the default network (`GWC2 §Extras: network`: "more than just the default Gnutella hosts"; GWC1, which has no `net`, is Gnutella-only). | A missing or empty `net` is treated as `gnutella2`. Shareaza 2.7 always sends `net`, on gets and updates (`DS:1413-1431`, `DS:1858-1863`), but a client that omits it is served as G2: a get receives G2 hubs, and with `ping` a pong, which a Shareaza-style G1 parser rejects on any G1 query (`DS:1641-1646`); its `ip=` is queued as a G2 hub, and its `url=` stored as a `pending` G2 cache. The handshake will not always weed such a hub out: a Gnutella ultrapeer answering a 503 with a reason other than Shareaza's four would be judged `alive_full` and served. | **open** |
+| Without `net`, Gnutella is implied to be the default network (`GWC2 §Extras: network`: "more than just the default Gnutella hosts"; GWC1, which has no `net`, is Gnutella-only). | A missing or empty `net` is Gnutella: a get receives only the self line, with no G2 hubs and no pong (which a Shareaza-style G1 parser would reject, `DS:1641-1646`), and an update stores neither its `ip=` nor its `url=`. A lone ping still gets the pong. Shareaza 2.7 always sends `net`, on gets and updates (`DS:1413-1431`, `DS:1858-1863`), so it is unaffected. | conforms (deviates from the brief: #14, approved) |
 | `cluster=` on updates is stored, and returned after the age (`GWC2 §Extras: clustering`, alpha). | Ignored on update. The `h\|` cluster field is always empty. Shareaza sends `getclusters=0` and skips the field (`DS:1490`). | not supported |
 
 ### GWC1 (v1.3.1), the original specification
@@ -533,8 +565,8 @@ Shareaza's Gnutella get still mixes in GWC1 parameters (`version=`,
 | Accept one update per IP every ~55 minutes, so that a bad submitter gets one entry an hour in (`GWC1 §4.1`). | See the GWC2 update-rate row above: it holds for hubs, not for `url=` submissions. | variant for hubs; deviation for `url=` |
 | Keep answering hostfile and urlfile requests from a client whose updates are blocked (`GWC1 §4.1`). | Gets and updates are limited under separate keys (`policy::RateKind`). | conforms |
 | Check that a submitted IP is the requester's (`GWC1 §4.1`). | Done (`CF-Connecting-IP`). | conforms |
-| A cache may ping submitted URLs (`GWC1 §4.1`). | A submitted URL is stored `pending` and is never served while pending. Pinging it is the verifying cron's job, from phase 5; until then no submitted URL is served. | conforms |
-| Keep only a few entries, flushing the oldest (`GWC1 §4`). | Up to 500 hubs and 50 caches, so that verification has a pool to draw from. Only hubs seen in the last 2 hours are served (`snapshot::LIST_WINDOW`). | variant |
+| A cache may ping submitted URLs (`GWC1 §4.1`). | A submitted URL is stored `pending` and served only after the verifying cron's ping got a pong; three failed pings in a row delete it (ADR-0012). | conforms |
+| Keep only a few entries, flushing the oldest (`GWC1 §4`). | Up to 500 live hubs and 50 caches, so that verification has a pool to draw from, plus up to 1,000 `dead` hubs kept so that failing hosts cannot loop through inserts (ADR-0012). Only hubs seen in the last 2 hours are served (`snapshot::LIST_WINDOW`). | variant |
 
 ### Shareaza wiki: "specification 2.1" and Shareaza's own behaviour
 
@@ -553,7 +585,7 @@ Shareaza's Gnutella get still mixes in GWC1 parameters (`version=`,
 | Caches ping other caches with `client=TEST` and `version=<cache name>`. | Accepted, like any client. | conforms |
 | `statfile` and `bfile` (spec 1 extras; `bfile` asks for hosts and URLs at once). | Not supported: `statfile` as in GWC1 above; a query carrying only `bfile` is not a GWC request either. | not supported |
 | Shareaza reacts to `i\|access\|period`, `i\|update\|period`, `i\|force\|remove`, `i\|update\|warning\|bad url`, `early`, `ERROR`, `OK`. | `i\|update\|period\|3600` and `i\|update\|OK` are sent. None of the lines that remove the cache or count as a failure is ever sent to a legitimate client (see "Reading a get response" and "Reading an update response"). | conforms |
-| Shareaza 2.4 sent no `net` on Gnutella queries. | Shareaza 2.7 sends `net=gnutella` (`DS:1427-1431`). Older clients still in the field that send no `net` are exactly the case of the open GWC2 row. | see the open row |
+| Shareaza 2.4 sent no `net` on Gnutella queries. | Shareaza 2.7 sends `net=gnutella` (`DS:1427-1431`). Older clients that send no `net` are answered as Gnutella (see the GWC2 `net` row). | conforms |
 
 ## Deviations from the project brief
 
@@ -575,6 +607,8 @@ what `gwc-edge` does. "Approved" means the project owner decided it.
 | 11 | Rate-limited get → `i\|update\|WARNING\|too many requests`, 1 get / 30 s per IP. | That reply adds nothing, so it is a failure. A single client sends hostfile and urlfile back to back (`DS:1340-1352`). | Limited per (address, request type), IPv6 by /64. Over the limit, the reply is the pong if asked plus the self `u\|` line, with no D1 read. | **approved** |
 | 12 | Hubs register with their IP. | A hub behind NAT may report a private address (`Network.m_pHost`). | Not stored, answered `OK` (#3). | **approved** (with #3) |
 | 13 | Never an empty body for an allowed client (brief addendum). | A pong on a G1 get is a failure (`DS:1641-1646`). | A ping without a get gets a pong on any network; G1 gets still get none. | **approved** |
+| 14 | `net` missing → assume `gnutella2`. | Shareaza always sends `net` (`DS:1413-1431`, `DS:1858-1863`); GWC2 implies Gnutella is the default. | A missing or empty `net` is Gnutella: only the self line, no pong, nothing stored. A lone ping still gets the pong. | **approved** |
+| 15 | Hubs are purged 24 h after their last successful update or verification. | — | Hubs leave the hostfile after 2 h, as the brief says. `dead` rows are kept for 48 h after they were last seen or checked, so that a failing host re-registering cannot loop through inserts (ADR-0012). | resolved |
 
 ## Test coverage of these findings
 

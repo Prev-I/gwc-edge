@@ -295,9 +295,9 @@ async fn store_hub(
     let Ok(existing) = probe.run("read_hub", || store::read_hub(db, &ip)).await else {
         return "error";
     };
-    let hubs = if existing.is_none() {
+    let live = if existing.is_none() {
         match probe
-            .run("read_counter", || store::read_counter(db, "hubs"))
+            .run("read_counter", || store::read_counter(db, "hubs_live"))
             .await
         {
             Ok(n) => n,
@@ -306,7 +306,7 @@ async fn store_hub(
     } else {
         0
     };
-    let plan = update::plan_hub(existing.as_ref(), claim, now, hubs);
+    let plan = update::plan_hub(existing.as_ref(), claim, now, live);
     let written = match plan {
         HubPlan::Insert => {
             probe
@@ -330,7 +330,12 @@ async fn store_hub(
                 })
                 .await
         }
-        HubPlan::Coalesced | HubPlan::Full => Ok(()),
+        HubPlan::Reregister => {
+            probe
+                .run("reregister_hub", || store::reregister_hub(db, claim, now))
+                .await
+        }
+        HubPlan::Coalesced | HubPlan::Full | HubPlan::BackingOff | HubPlan::Queued => Ok(()),
     };
     if written.is_ok() {
         plan.as_str()

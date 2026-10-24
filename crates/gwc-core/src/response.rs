@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn hosts_come_before_caches_when_both_are_asked() {
-        let q = parse("get=1&hostfile=1&urlfile=1&client=TEST").unwrap();
+        let q = parse("get=1&hostfile=1&urlfile=1&net=gnutella2&client=TEST").unwrap();
         let caches = [cache("http://other.example.net/gwc/", 5)];
         let lines = get_reply(&q, &[host(1)], &caches, &self_url());
         assert_eq!(
@@ -553,6 +553,25 @@ mod tests {
         // never sends a G1 ping, and a G1 *get* still gets no pong.
         let q = parse("ping=1&net=gnutella&client=TEST&version=0.1").unwrap();
         assert_eq!(get_reply(&q, &[host(1)], &[], &self_url()), [Line::Pong]);
+    }
+
+    #[test]
+    fn a_get_without_net_is_answered_as_gnutella() {
+        // GWC2 makes Gnutella the default network, so a client that names
+        // none gets no G2 hubs and no pong, which a Shareaza-style G1 parser
+        // would reject (`:1641-1646`): only this cache's own line.
+        let q = parse("get=1&hostfile=1&urlfile=1&ping=1&client=RAZA&version=2.4").unwrap();
+        let caches = [cache("http://other.example.net/gwc/", 5)];
+        let lines = get_reply(&q, &[host(1)], &caches, &self_url());
+        assert_eq!(
+            rendered(&lines),
+            ["u|http://gwc.example.org/|0".to_string()]
+        );
+        assert_eq!(
+            shareaza::get(&render(&lines), false, &[&self_url().url]),
+            Outcome::Success,
+            "a G1 parser accepts it"
+        );
     }
 
     #[test]
