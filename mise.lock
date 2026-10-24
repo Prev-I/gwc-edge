@@ -42,6 +42,11 @@ checksum = "sha256:975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf8
 url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz"
 url_api = "https://api.github.com/repos/EmbarkStudios/cargo-deny/releases/assets/471599057"
 
+[[tools."cargo:cargo-fuzz"]]
+version = "0.13.2"
+backend = "cargo:cargo-fuzz"
+specifiers = ["0.13.2"]
+
 [[tools."cargo:cargo-llvm-cov"]]
 version = "0.9.1"
 backend = "cargo:cargo-llvm-cov"
@@ -99,3 +104,11 @@ specifiers = ["1.99.1"]
 [tools.rust.options]
 components = "clippy,llvm-tools,rustfmt"
 targets = "wasm32-unknown-unknown"
+
+[[tools.rust]]
+version = "nightly-2026-10-20"
+backend = "core:rust"
+specifiers = ["nightly-2026-10-20"]
+
+[tools.rust.options]
+profile = "minimal"

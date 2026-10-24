@@ -1,0 +1,9 @@
+GNUTELLA/0.6 200 OK
+User-Agent: Sh2.7.1
+Accept: application/x-gnutella2
+Content-Type: application/x-gnutella2
+X-Ultrapeer: True
+X-Ultrapeer-Needed: 
+Listen-IP:08.4.4:6346
+Remote-IP:.1.1.1:82468
+

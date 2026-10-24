@@ -122,7 +122,7 @@ await_health() {
 }
 
 # Start the Worker in a fresh process, so its isolate remembers nothing.
-# --test-scheduled exposes /__scheduled, to run the cron on demand.
+# --test-scheduled exposes /cdn-cgi/local/scheduled, to run the cron on demand.
 start_worker() {
   wrangler dev --port "$port" --ip 127.0.0.1 --persist-to "$state" --test-scheduled \
     --var "CANONICAL_URL:$self_url" --var "TEST_DIAL:$test_dial" >>"$log" 2>&1 &
@@ -173,8 +173,8 @@ grep -q '^h|8.8.4.4:6346|' <<<"$body" || fail "no hosts from the live fallback b
 health="$(curl "${curl_opts[@]}" "${base}healthz")" || fail "healthz request failed"
 grep -q '"hostfile":' <<<"$health" || fail "live fallback did not write the snapshot back: $health"
 
-curl "${curl_opts[@]}" "${base}__scheduled?cron=*/10+*+*+*+*" >/dev/null || fail "cron trigger failed"
-# /__scheduled answers 200 whatever the cron did: prove it ran. Only the
+curl "${curl_opts[@]}" "${base}cdn-cgi/local/scheduled?cron=*/10+*+*+*+*" >/dev/null || fail "cron trigger failed"
+# /cdn-cgi/local/scheduled answers 200 whatever the cron did: prove it ran. Only the
 # cron writes the stats and cron documents.
 health="$(curl "${curl_opts[@]}" "${base}healthz")" || fail "healthz request failed"
 grep -q '"stats":' <<<"$health" || fail "cron did not render stats: $health"

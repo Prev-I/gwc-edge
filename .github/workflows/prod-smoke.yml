@@ -1,0 +1,75 @@
+name: prod-smoke
+
+# Once a day, check the deployed cache as Shareaza sees it
+# (scripts/smoke.sh --prod): zone settings changed in the dashboard break
+# Shareaza without failing anything else. A failure opens an issue, or
+# comments on the open one; a later success closes it. Skipped until
+# GWC_CANONICAL_URL is set. GitHub disables scheduled workflows after 60 days
+# without repository activity: re-enable it in the Actions tab if so.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  smoke:
+    name: production smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GWC_CANONICAL_URL: ${{ vars.GWC_CANONICAL_URL }}
+    steps:
+      - name: configured?
+        id: configured
+        run: |
+          if [ -n "$GWC_CANONICAL_URL" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipped: set the GWC_CANONICAL_URL variable."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.configured.outputs.ok == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: steps.configured.outputs.ok == 'true'
+        name: smoke --prod
+        id: smoke
+        # The runner's own node and curl are enough; no build.
+        run: |
+          set -o pipefail
+          scripts/smoke.sh --prod "$GWC_CANONICAL_URL" 2>&1 | tee smoke.txt
+      - if: failure() && steps.smoke.outcome == 'failure'
+        name: open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create prod-smoke --color B60205 \
+            --description "The daily production smoke test failed" --force
+          # A four-backtick fence: the output itself may contain three.
+          body="$(printf 'The production smoke test failed: %s\n\n````\n%s\n````\n\nSee docs/operations.md and the README section "Zone settings".' \
+            "$RUN_URL" "$(tail -c 3000 smoke.txt | tr -d '`')")"
+          open="$(gh issue list --label prod-smoke --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --label prod-smoke --title "Production smoke test failing" --body "$body"
+          fi
+      - if: success() && steps.smoke.outcome == 'success'
+        name: close the issue once it passes again
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          open="$(gh issue list --label prod-smoke --state open --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$open" ]; then
+            gh issue close "$open" --comment "The production smoke test passes again: $RUN_URL"
+          fi

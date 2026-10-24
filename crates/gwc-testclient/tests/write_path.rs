@@ -3,7 +3,7 @@
 //! `scripts/integration.sh` against the seeded cache, after the read-path
 //! tests (test binaries run in name order).
 //!
-//! Hubs and caches here use addresses no other test touches. `/__scheduled`
+//! Hubs and caches here use addresses no other test touches. `/cdn-cgi/local/scheduled`
 //! runs the cron on demand (`wrangler dev --test-scheduled`). A self-registered
 //! hub is stored `unverified` and listed only after a successful handshake
 //! (ADR-0011). `TEST_DIAL` maps 4.2.2.1 to a fake hub that accepts; every
@@ -32,7 +32,10 @@ fn fresh_stats(c: &Client) -> serde_json::Value {
 
 /// Run the cron once, as its trigger would.
 fn cron(c: &Client) {
-    assert_eq!(c.get("/__scheduled?cron=*/10+*+*+*+*").status, 200);
+    assert_eq!(
+        c.get("/cdn-cgi/local/scheduled?cron=*/10+*+*+*+*").status,
+        200
+    );
 }
 
 fn stats(c: &Client) -> serde_json::Value {

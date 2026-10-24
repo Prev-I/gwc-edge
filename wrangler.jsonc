@@ -2,9 +2,12 @@
   "name": "gwc-edge",
   "main": "crates/gwc-worker/build/index.js",
   "compatibility_date": "2026-10-20",
+  // A template (ADR-0015): scripts/deploy.sh renders wrangler.deploy.json
+  // from it, with the database id, CANONICAL_URL and the Custom Domain route.
+  // Never commit those here.
+  //
   // One canonical URL (docs/protocol.md): no *.workers.dev address and no
-  // preview URLs. The Worker is reached only through its custom-domain route,
-  // added at deployment (README).
+  // preview URLs. The Worker is reached only through its Custom Domain.
   "workers_dev": false,
   "preview_urls": false,
   "build": {
@@ -18,15 +21,15 @@
     {
       "binding": "DB",
       "database_name": "gwc-edge",
-      // Omitted on purpose: wrangler provisions the database on first deploy
-      // and local development needs no id. Set it once the database exists.
-      // "database_id": "",
+      // No database_id: local development needs none, and deploy.sh adds
+      // the real one to the rendered config.
       "migrations_dir": "migrations"
     }
   ],
   "vars": {
     // This cache's public URL, exactly as clients store it: plain http://,
-    // the custom domain, no alias. Replace before deploying.
+    // the custom domain, no alias. A placeholder for local runs; deploy.sh
+    // sets it from GWC_CANONICAL_URL.
     "CANONICAL_URL": "http://gwc.example.org/",
     "HOSTFILE_COUNT": "20",
     "URLFILE_COUNT": "20",
@@ -40,7 +43,8 @@
     { "name": "UPDATE_LIMITER", "namespace_id": "4802", "simple": { "limit": 1, "period": 60 } }
   ],
   "triggers": {
-    // Renders the hostfile snapshot (and hourly stats); verification joins later.
+    // Verifies hubs and caches, then renders the hostfile snapshot and the
+    // hourly stats (ADR-0012).
     "crons": ["*/10 * * * *"]
   },
   // Workers Logs: every invocation, and the one JSON line per request the

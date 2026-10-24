@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/gwc-core", "crates/gwc-testclient", "crates/gwc-worker"]
+# Fuzz targets build only with nightly, in their own workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

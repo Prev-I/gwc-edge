@@ -21,7 +21,10 @@ docs/protocol.md    the protocol authority: GWC v2 as Shareaza speaks it, with c
 docs/adr/           one record per decision; change a decision with a new record
 docs/spec/          verbatim copies of the published GWC specs (GNU FDL), never edited; README.md is ours
 docs/operations.md  logs, /stats, /healthz, and the expected failure modes
-scripts/smoke.sh    wrangler dev + local D1 + /healthz check (also run in CI)
+scripts/smoke.sh    wrangler dev + local D1 + /healthz and --prod checks (also run in CI);
+                    `--prod <url>` checks a deployed cache as Shareaza sees it
+scripts/deploy.sh   render wrangler.deploy.json, migrate, deploy, smoke --prod (ADR-0015)
+scripts/fuzz.sh     cargo fuzz on the dated nightly; fuzz/ is its own workspace
 scripts/integration.sh  wrangler dev + isolated seeded D1 + cron run + gwc-testclient tests
 wrangler.jsonc      Worker config; build runs worker-build
 wrangler.no-d1.jsonc  tests only: the Worker without D1, for degraded-mode tests
@@ -44,7 +47,9 @@ cargo clippy -p gwc-worker --target wasm32-unknown-unknown -- -D warnings
 cargo deny check
 cargo test --workspace
 cargo llvm-cov -p gwc-core --summary-only --fail-under-lines 90
-wrangler deploy --dry-run --outdir target/wrangler-dist   # build + bundle, no upload
+GWC_CANONICAL_URL=http://gwc.example.org/ scripts/deploy.sh --dry-run   # render + bundle, no upload
+node --test 'scripts/*.test.mjs'
+scripts/fuzz.sh --replay             # every committed fuzz input once (CI); scripts/fuzz.sh 60 to fuzz
 wrangler d1 migrations apply DB --local
 scripts/smoke.sh                     # SMOKE_PORT overrides the default 18787
 scripts/integration.sh               # GWC_PORT overrides the default 18789
@@ -102,10 +107,14 @@ every push to `main`.
   (ADR-0012).
 - **`TEST_DIAL` is for `scripts/integration.sh` only.** Never put it in a
   `wrangler*.jsonc`; a core test enforces it.
-- **Migration 0001 may still be edited in place** only while `wrangler.jsonc`
-  has no `database_id`. After the first remote apply, every change is a new
-  `migrations/000N_*.sql`. Core tests check that the CHECK constraints match
-  core's bounds (`Kind`, `MIN_PORT`); keep it that way when adding columns.
+- **Migrations are frozen** (ADR-0015): `migrations/SHA256SUMS` lists each
+  file's hash and CI checks it. A schema change is a new
+  `migrations/000N_*.sql`, plus its line in `SHA256SUMS`; never edit an
+  existing one. Core tests check that the CHECK constraints match core's
+  bounds (`Kind`, `MIN_PORT`); keep it that way when adding columns.
+- **The committed `wrangler.jsonc` is a template** (ADR-0015): never commit a
+  `database_id`, a route or a real `CANONICAL_URL`. `scripts/deploy.sh`
+  renders `wrangler.deploy.json` (git-ignored) with them.
 - **Pin exact versions** (`=x.y.z`) in `[workspace.dependencies]`, and pin
   GitHub Actions by commit SHA.
 

@@ -17,3 +17,6 @@ changed by a new record that supersedes the old one, never by editing it.
 | [0010](0010-the-write-path.md) | The write path: what an update stores (partly superseded by 0011) |
 | [0011](0011-hubs-are-listed-after-a-handshake.md) | Hubs are listed only after a handshake; coalescing on time; diversity cap (amended by 0012) |
 | [0012](0012-the-verifying-cron.md) | The verifying cron: queue, budget, `dead` rows, `X-Try-Hubs`, cache pings, test seam |
+| [0013](0013-verification-runs-in-the-cron.md) | Hubs and caches are verified by the cron, not inline |
+| [0014](0014-plain-http-on-a-custom-domain.md) | Plain HTTP, on one Custom Domain; the zone settings Shareaza needs |
+| [0015](0015-deployment-and-frozen-migrations.md) | Deployment renders its config; migrations are frozen from v0.1.0 |
