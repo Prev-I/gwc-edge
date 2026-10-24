@@ -58,7 +58,15 @@ pub struct RequestLine<'a> {
     /// `ip:source_mismatch`. Labels only, never an address or URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update: Option<&'a str>,
+    /// [`RATE_LIMIT_UNAVAILABLE`] when the request should have been rate
+    /// limited but the Rate Limiting binding was missing or failed, so it was
+    /// let through (fail-open, ADR-0005). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<&'a str>,
 }
+
+/// [`RequestLine::rate_limit`] for a request let through unchecked.
+pub const RATE_LIMIT_UNAVAILABLE: &str = "unavailable";
 
 impl RequestLine<'_> {
     /// The line as one compact JSON object.
@@ -100,6 +108,7 @@ mod tests {
             cf_colo: "MXP",
             snapshot: Some("stored"),
             update: None,
+            rate_limit: None,
         }
     }
 
@@ -137,6 +146,13 @@ mod tests {
             ..line()
         };
         assert!(!keys(&no_snapshot.to_json()).contains("snapshot"));
+        let unlimited = RequestLine {
+            rate_limit: Some(RATE_LIMIT_UNAVAILABLE),
+            ..line()
+        };
+        let json = unlimited.to_json();
+        assert!(keys(&json).contains("rate_limit"));
+        assert!(json.contains(r#""rate_limit":"unavailable""#), "{json}");
     }
 
     #[test]

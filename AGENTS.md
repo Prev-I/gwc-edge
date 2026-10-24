@@ -25,6 +25,7 @@ docs/field-test-plan.md  how to prove the deployed cache with real Shareaza clie
 scripts/smoke.sh    wrangler dev + local D1 + /healthz and --prod checks (also run in CI);
                     `--prod <url>` checks a deployed cache as Shareaza sees it
 scripts/deploy.sh   render wrangler.deploy.json, migrate, deploy, smoke --prod (ADR-0015)
+scripts/ci-gate.mjs the deploy workflow's gate: main's tip with green CI on that commit (ADR-0018)
 scripts/fuzz.sh     cargo fuzz on the dated nightly; fuzz/ is its own workspace
 scripts/seed.sh     one-shot seeding from another cache (dkac) via the gwc_seed tool
 scripts/integration.sh  wrangler dev + isolated seeded D1 + cron run + gwc-testclient tests

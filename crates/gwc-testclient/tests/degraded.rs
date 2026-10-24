@@ -1,7 +1,8 @@
-//! Degraded mode, end to end: the same Worker with no D1 binding
-//! (`wrangler.no-d1.jsonc`), so every D1 call fails. Every protocol reply must
-//! still be the protocol minimum, never a 5xx, and never empty for an
-//! allowed client. Run by `scripts/integration.sh`.
+//! Degraded mode, end to end: the same Worker with no D1 binding and no Rate
+//! Limiting bindings (`wrangler.no-d1.jsonc`), so every D1 call fails and
+//! every limiter call fails open. Every protocol reply must still be the
+//! protocol minimum, never a 5xx, and never empty for an allowed client.
+//! Run by `scripts/integration.sh`.
 
 use gwc_testclient::Client;
 use gwc_testclient::logs::{is_request_line, len, settle};
@@ -38,6 +39,48 @@ fn urlfile_is_pong_and_self() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines[0].starts_with("i|pong|"));
     assert_eq!(lines[1], self_line());
+}
+
+#[test]
+#[ignore = "needs a running degraded cache: scripts/integration.sh"]
+fn an_unavailable_rate_limiter_lets_requests_through_and_says_so() {
+    // Fail-open (ADR-0005): three gets from one source, past the 2-a-minute
+    // limit, all answered in full, each logged as unchecked; the isolate's
+    // first such request also logs one warning naming the binding.
+    let log = std::env::var("GWC_DEGRADED_LOG_FILE").expect("GWC_DEGRADED_LOG_FILE");
+    let c = client();
+    let me = [("CF-Connecting-IP", "2001:db8:1111:1::1")];
+    let from = len(&log);
+    for _ in 0..3 {
+        let r = c.request(
+            "GET",
+            "?get=1&hostfile=1&net=gnutella2&ping=1&client=RAZA2.7.10.6",
+            &me,
+        );
+        assert_eq!(r.lines().len(), 2, "not rate limited: {}", r.body);
+    }
+    let lines = settle(&log, from, 3, is_request_line);
+    assert_eq!(lines.len(), 3);
+    for l in &lines {
+        assert_eq!(l["kind"], "hostfile", "{l}");
+        assert_eq!(l["rate_limit"], "unavailable", "{l}");
+    }
+    let warnings: Vec<_> = gwc_testclient::logs::json_since(&log, 0)
+        .into_iter()
+        .filter(|v| v["event"] == "rate_limiter_unavailable")
+        .collect();
+    assert!(!warnings.is_empty(), "the binding failure is logged");
+    for w in &warnings {
+        assert_eq!(w["level"], "warn");
+        assert!(w["binding"].is_string(), "{w}");
+        assert!(!w.to_string().contains("2001:db8"), "{w}");
+    }
+
+    // Requests that are never rate limited are not marked.
+    let from = len(&log);
+    let _ = c.get("?ping=1&client=TEST&version=0.1");
+    let ping = settle(&log, from, 1, is_request_line);
+    assert!(ping[0].get("rate_limit").is_none(), "{}", ping[0]);
 }
 
 #[test]

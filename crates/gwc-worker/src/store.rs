@@ -9,7 +9,9 @@ use gwc_core::cache_url::CacheUrl;
 use gwc_core::counters::Key;
 use gwc_core::snapshot::{LIST_WINDOW, SnapCache, SnapHub, Snapshot};
 use gwc_core::stats::{ClientCount, MAX_CLIENTS, Totals};
-use gwc_core::update::{HubClaim, HubRow};
+use gwc_core::update::{
+    COUNT_INSERTED_CACHE, COUNT_INSERTED_HUB, HubClaim, HubRow, UNCOUNT_REQUEUED_CANDIDATE,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use worker::wasm_bindgen::JsValue;
@@ -464,8 +466,10 @@ fn opt_str(s: Option<&str>) -> JsValue {
 
 /// Insert a hub that registered itself, `unverified` until the cron's first
 /// successful handshake (ADR-0011), and count it, in one batch. Writes 2
-/// rows. A concurrent insert of the same IP makes the first statement a no-op;
-/// the cron reconciles `counts` from the table on every run.
+/// rows. The counter adds `changes()`, the rows the insert just changed: a
+/// concurrent insert of the same IP makes the insert a no-op and the counter
+/// add 0, so a lost race never inflates the cap. The cron still reconciles
+/// `counts` from the table on every run.
 pub async fn insert_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<()> {
     let ip = claim.addr.ip().to_string();
     db.batch(vec![
@@ -476,7 +480,7 @@ pub async fn insert_hub(db: &D1Database, claim: &HubClaim, now: u64) -> Result<(
              ON CONFLICT (ip) DO NOTHING",
         )
         .bind(&hub_values(&ip, claim, now))?,
-        db.prepare("UPDATE counts SET n = n + 1 WHERE k = 'hubs_live'"),
+        db.prepare(COUNT_INSERTED_HUB),
     ])
     .await?;
     Ok(())
@@ -528,17 +532,23 @@ pub async fn requeue_hub(
     was_try_hubs: bool,
 ) -> Result<()> {
     let ip = claim.addr.ip().to_string();
-    let mut stmts = vec![
+    let mut stmts = Vec::with_capacity(2);
+    if was_try_hubs {
+        // First, while the row is still a candidate: it leaves that count
+        // only if no concurrent request or cron run changed it meanwhile.
+        stmts.push(
+            db.prepare(UNCOUNT_REQUEUED_CANDIDATE)
+                .bind(&[ip.as_str().into()])?,
+        );
+    }
+    stmts.push(
         db.prepare(
             "UPDATE hubs SET port = ?2, status = 'unverified', source = 'update', vendor = ?3, \
              version = ?4, leaves = ?5, max_leaves = ?6, up_since = ?7, last_seen = ?8 \
              WHERE ip = ?1 AND status <> 'dead'",
         )
         .bind(&hub_values(&ip, claim, now))?,
-    ];
-    if was_try_hubs {
-        stmts.push(db.prepare("UPDATE counts SET n = n - 1 WHERE k = 'hubs_unverified' AND n > 0"));
-    }
+    );
     db.batch(stmts).await?;
     Ok(())
 }
@@ -558,7 +568,8 @@ fn hub_values(ip: &str, claim: &HubClaim, now: u64) -> [JsValue; 8] {
 }
 
 /// Store a submitted cache as `pending`, and count it, in one batch. Writes 2
-/// rows.
+/// rows; like [`insert_hub`], the counter adds only the rows the insert
+/// changed.
 pub async fn insert_cache(
     db: &D1Database,
     url: &CacheUrl,
@@ -576,7 +587,7 @@ pub async fn insert_cache(
             submitted_by.into(),
             num(now),
         ])?,
-        db.prepare("UPDATE counts SET n = n + 1 WHERE k = 'caches'"),
+        db.prepare(COUNT_INSERTED_CACHE),
     ])
     .await?;
     Ok(())

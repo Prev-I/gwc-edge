@@ -166,6 +166,30 @@ pub fn parse_reply(bytes: &[u8]) -> Parse {
     })
 }
 
+/// Watches a reply as it arrives, for the reader's stop condition: whether
+/// [`parse_reply`] can settle it yet. Each call looks only at the bytes added
+/// since the last one (plus two for a line end split across reads), so a hub
+/// that trickles its reply one byte at a time costs linear work, not
+/// quadratic: the cron has 10 ms of CPU. Feed it the whole buffer each time.
+#[derive(Debug, Clone, Default)]
+pub struct ReplyWatch {
+    searched: usize,
+}
+
+impl ReplyWatch {
+    /// Whether the header block is complete, or the reply is already too
+    /// long to be valid: either way, reading can stop.
+    pub fn settled(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() > MAX_REPLY || bytes.first() == Some(&b'\n') || bytes.starts_with(b"\r\n") {
+            return true;
+        }
+        let from = self.searched.saturating_sub(2);
+        self.searched = bytes.len();
+        let new = &bytes[from..];
+        new.windows(2).any(|w| w == b"\n\n") || new.windows(3).any(|w| w == b"\n\r\n")
+    }
+}
+
 /// Index just past the first empty line (`\n\n` or `\n\r\n`), if any.
 fn header_block_end(bytes: &[u8]) -> Option<usize> {
     let mut line_start = 0;
@@ -359,6 +383,45 @@ mod tests {
         X-Ultrapeer: True\r\n\
         X-Try-Hubs: 9.9.9.9:6346 2026-10-23T08:30Z,1.0.0.1:6347 2026-10-22T23:59Z\r\n\
         \r\n";
+
+    #[test]
+    fn the_watch_stops_exactly_where_the_parser_can_settle() {
+        for reply in [
+            SHAREAZA_200,
+            SHAREAZA_503_FULL,
+            "GNUTELLA/0.6 503 Busy\nX-Try-Hubs: 8.8.8.8:6346\n\n",
+            "GNUTELLA/0.6 200 OK\r\nA: b\r\n\r\nbody",
+            "\r\n",
+            "garbage\n\n",
+        ] {
+            let bytes = reply.as_bytes();
+            let mut watch = ReplyWatch::default();
+            for end in 1..=bytes.len() {
+                let parsed = !matches!(parse_reply(&bytes[..end]), Parse::Incomplete);
+                assert_eq!(watch.settled(&bytes[..end]), parsed, "{reply:?} at {end}");
+                if parsed {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_trickled_reply_is_watched_in_linear_work() {
+        // A hub sending header lines one byte at a time, up to the size
+        // limit: each call looks at what is new, never the whole buffer.
+        let reply = "X-Pad: y\r\n".repeat(MAX_REPLY / 10);
+        let bytes = reply.as_bytes();
+        let mut watch = ReplyWatch::default();
+        let mut looked = 0;
+        for end in 1..=bytes.len().min(MAX_REPLY) {
+            let before = watch.searched;
+            assert!(!watch.settled(&bytes[..end]));
+            looked += end - before.saturating_sub(2);
+        }
+        assert!(looked <= 3 * MAX_REPLY, "{looked}");
+        assert!(watch.settled(&[b'x'; MAX_REPLY + 1]), "too long: stop");
+    }
 
     #[test]
     fn only_a_reply_can_vouch_for_a_hub() {

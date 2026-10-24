@@ -56,6 +56,23 @@ pub fn reconcile_sql() -> [String; 3] {
     })
 }
 
+/// Counts the hub that the `INSERT … ON CONFLICT DO NOTHING` just before it,
+/// in the same D1 batch, actually inserted: `changes()` is the row count of
+/// the last completed statement on the connection, 0 when a concurrent
+/// request inserted the same IP first. An unconditional `n + 1` would inflate
+/// the live cap until the cron's reconcile.
+pub const COUNT_INSERTED_HUB: &str = "UPDATE counts SET n = n + changes() WHERE k = 'hubs_live'";
+
+/// The same for a cache insert.
+pub const COUNT_INSERTED_CACHE: &str = "UPDATE counts SET n = n + changes() WHERE k = 'caches'";
+
+/// Takes a requeued hub (`?1`, its IP) out of the `X-Try-Hubs` candidates'
+/// count, only if it is still a candidate when the batch runs. It must run
+/// before the statement that requeues it, which changes its source.
+pub const UNCOUNT_REQUEUED_CANDIDATE: &str = "UPDATE counts SET n = n - 1 \
+     WHERE k = 'hubs_unverified' AND n > 0 \
+     AND EXISTS (SELECT 1 FROM hubs WHERE ip = ?1 AND status = 'unverified' AND source = 'try_hubs')";
+
 /// Whether a normalised cache URL is this cache: same host and port,
 /// whatever the path, since every path there reaches this cache.
 #[must_use]

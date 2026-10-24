@@ -12,6 +12,8 @@
 //! | ping.example.net, dkac.trillinux.org | a pong, fetched | `verified` |
 //! | sock.example.net:6348 | a pong, over a socket | `verified` |
 //! | redirect.example.net | a 302 to dkac | `failed`: redirects are not followed |
+//! | linger.example.net:6349, lingerfetch.example.net | a pong, then the connection held open | `verified`, without waiting for the close |
+//! | halfpong.example.net:6350 | half a pong line, then the connection held open | `failed` |
 //!
 //! Every other target is blocked, which counts as a failed check. Runs after
 //! the read-path tests and before the write-path ones (name order).
@@ -135,6 +137,43 @@ fn hubs_are_judged_by_their_handshake() {
             "{never} was never a candidate"
         );
     }
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn a_cache_that_keeps_its_connection_open_is_judged_by_its_reply() {
+    // fake_peer answers a pong and then holds the connection for 20 s, past
+    // the 10 s ping deadline: the reply alone must settle the ping, over a
+    // socket and through fetch alike. Half a pong line, held the same way,
+    // is never taken for one.
+    let (c, log) = (client(), log_file());
+    let socket = "http://linger.example.net:6349/";
+    let fetched = "http://lingerfetch.example.net/";
+    let half = "http://halfpong.example.net:6350/";
+    for url in [socket, fetched, half] {
+        ok_reply(&c.submit(url));
+    }
+    let from = len(&log);
+    let pinged = |url: &str| {
+        json_since(&log, from)
+            .into_iter()
+            .rfind(|v| v["kind"] == "cron_cache" && v["url"] == url)
+    };
+    // Two pings per run; earlier tests' submissions may come first.
+    for _ in 0..6 {
+        cron(&c, &log);
+        if [socket, fetched, half].iter().all(|u| pinged(u).is_some()) {
+            break;
+        }
+    }
+    for url in [socket, fetched] {
+        assert_eq!(pinged(url).expect("pinged")["result"], "verified", "{url}");
+    }
+    assert_eq!(pinged(half).expect("pinged")["result"], "failed");
+    let urls = c.urlfile();
+    assert!(listed(&urls, "u|", socket), "{}", urls.body);
+    assert!(listed(&urls, "u|", fetched), "{}", urls.body);
+    assert!(!listed(&urls, "u|", half));
 }
 
 #[test]

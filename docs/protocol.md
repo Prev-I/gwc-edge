@@ -409,8 +409,17 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
 - A missing path becomes `/`.
 - `https://` URLs are recognised but not stored. Shareaza ignores them in `u|`
   lines.
-- DNS names that *resolve* to private addresses cannot be caught here. Cache
-  verification must cover that.
+- DNS names that cannot be public by their form are refused (ADR-0017):
+  special-use and LAN last labels (`.local`, `.internal`, `.home.arpa`,
+  `.lan` and others), and names embedding a non-public IPv4 address the way
+  wildcard DNS services read it: four octets in a row separated by `.` or
+  `-`, or eight hex digits (`10.0.0.1.nip.io`, `a-10-0-0-1-b.sslip.io`,
+  `app-c0a80001.nip.io`).
+- DNS names that *resolve* to private addresses, now or later, cannot be
+  caught here. Sockets from Workers cannot connect to private addresses
+  (documented); for `fetch()` this is assumed. Either way such a cache is not
+  verified while it resolves to one. A name that rebinds only for clients
+  after it was verified remains a documented residual risk (ADR-0017).
 
 **Hub addresses** (`addr::parse_hub`):
 - Canonical dotted-quad IPv4 only, so no leading zeros, which `inet_addr` would
@@ -459,6 +468,22 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
   `HR:253-257`).
 - **Pong:** HTTP `200` and a line `i|pong|<name>[|<networks>]` whose networks,
   when present, include `gnutella2` (split on `-`).
+- **When the reply is judged** (`ping::Reader`):
+  - at once, when the status line is malformed or the status is not 200;
+  - as soon as a complete pong line, ended by CR or LF, has arrived;
+  - over a socket, when the body reaches its `Content-Length` and a line end
+    follows its last line. If anything else follows, the length cut the
+    line and there is no pong. `fetch()` delimits the body itself, so its
+    `Content-Length` is not used;
+  - otherwise when the peer closes, when 16 KiB arrive without a verdict
+    (no pong), or when the 10 s deadline passes (no pong).
+
+  A cache that keeps its connection open after replying is not failed for
+  it, provided its pong line ends with CR or LF, or its `Content-Length`
+  frames the body (then the deadline completes the last line); a last line
+  with neither may still have been arriving, and is no pong. Half a pong
+  line is never taken for one. The work is linear in the reply's length, so
+  a peer trickling its reply costs the cron little.
 - **Result:** a pong makes the cache `verified` and served. A failure makes it
   `failed` (not served, pinged again after an hour); three in a row delete it.
   A verified cache is pinged again every 6 hours. At most 2 pings a run.

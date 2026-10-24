@@ -138,8 +138,14 @@ scripts/smoke.sh --prod http://gwc.example.org/
 ### 4. Deploy from GitHub (optional)
 
 `.github/workflows/deploy.yml` deploys `main` after CI passes on it, or when
-started by hand on `main`. It skips a commit that is no longer `main`'s tip,
-so a slow CI run cannot roll production back. In the repository settings:
+started by hand on `main`. Either way it first checks, through the GitHub
+API, that the commit is `main`'s tip and that CI passed on that exact commit
+(ADR-0018):
+- a commit that is no longer the tip is skipped, so a slow CI run cannot
+  roll production back;
+- a commit whose CI failed, is still running or never ran is refused.
+
+In the repository settings:
 1. **Create an environment `production`** (Settings → Environments), with
    Deployment branches limited to `main`.
 2. **Add the two secrets to that environment**, not to the repository, so no

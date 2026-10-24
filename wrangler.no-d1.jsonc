@@ -1,6 +1,7 @@
-// Tests only (scripts/integration.sh): the same Worker with no D1 binding,
-// so every D1 call fails and the degraded mode can be exercised end to end.
-// Kept apart from wrangler.jsonc so the production config has no test env.
+// Tests only (scripts/integration.sh): the same Worker with no D1 binding
+// and no Rate Limiting bindings, so every D1 call fails and every limiter
+// call fails open: both degraded paths are exercised end to end. Kept apart
+// from wrangler.jsonc so the production config has no test env.
 {
   "name": "gwc-edge-no-d1",
   "main": "crates/gwc-worker/build/index.js",
@@ -9,12 +10,6 @@
     "command": "cd crates/gwc-worker && GWC_GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) worker-build --release",
     "watch_dir": ["crates/gwc-core/src", "crates/gwc-worker/src"]
   },
-  // Rate limiting (ADR-0005): per source and kind, no D1 writes. The
-  // namespace ids only need to be unique within the Cloudflare account.
-  "ratelimits": [
-    { "name": "GET_LIMITER", "namespace_id": "4801", "simple": { "limit": 2, "period": 60 } },
-    { "name": "UPDATE_LIMITER", "namespace_id": "4802", "simple": { "limit": 1, "period": 60 } }
-  ],
   "vars": {
     "CANONICAL_URL": "http://gwc.example.org/",
     "HOSTFILE_COUNT": "20",

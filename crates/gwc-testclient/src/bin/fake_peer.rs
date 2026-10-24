@@ -14,6 +14,8 @@
 //! | base + 6 | a hub that closes in the middle of its header block |
 //! | base + 7 | an HTTP redirect to a real cache (not followed) |
 //! | base + 8 | another GWebCache's hostfile and urlfile, for `gwc_seed` |
+//! | base + 9 | a GWebCache pong, then the connection held open for 20 s |
+//! | base + 10 | half a pong line, then the connection held open for 20 s |
 //!
 //! base + 4 is left closed, for a connection that is refused.
 
@@ -34,7 +36,7 @@ fn main() {
         .nth(1)
         .and_then(|p| p.parse().ok())
         .expect("usage: fake_peer <base-port>");
-    let behaviours: [(u16, Behaviour); 8] = [
+    let behaviours: [(u16, Behaviour); 10] = [
         (0, |_| hub_ok()),
         (1, |_| hub_full()),
         (2, |_| leaf()),
@@ -43,18 +45,21 @@ fn main() {
         (6, |_| cut_short()),
         (7, |_| redirect()),
         (8, other_cache),
+        (9, |_| cache()),
+        (10, |_| half_pong()),
     ];
     let mut threads = Vec::new();
     for (offset, reply) in behaviours {
+        let linger = matches!(offset, 9 | 10);
         let listener = TcpListener::bind(("127.0.0.1", base + offset))
             .unwrap_or_else(|e| panic!("bind {}: {e}", base + offset));
         threads.push(std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                std::thread::spawn(move || answer(stream, reply));
+                std::thread::spawn(move || answer(stream, reply, linger));
             }
         }));
     }
-    println!("fake_peer: listening on 127.0.0.1:{base}..{}", base + 8);
+    println!("fake_peer: listening on 127.0.0.1:{base}..{}", base + 10);
     for t in threads {
         let _ = t.join();
     }
@@ -62,7 +67,7 @@ fn main() {
 
 /// Read the request's header block (or give up after 2 s), then reply and
 /// close.
-fn answer(mut stream: TcpStream, reply: Behaviour) {
+fn answer(mut stream: TcpStream, reply: Behaviour, linger: bool) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut got = Vec::new();
     let mut buf = [0u8; 1024];
@@ -73,6 +78,11 @@ fn answer(mut stream: TcpStream, reply: Behaviour) {
         }
     }
     let _ = stream.write_all(&reply(&got));
+    // Some caches keep the connection open after replying: hold it well past
+    // the cron's 10 s ping deadline.
+    if linger {
+        std::thread::sleep(Duration::from_secs(20));
+    }
 }
 
 fn hub_ok() -> Vec<u8> {
@@ -140,6 +150,11 @@ fn other_cache(request: &[u8]) -> Vec<u8> {
          u|http://gwc.example.org/|0\r\n"
     };
     format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}").into_bytes()
+}
+
+/// A reply cut in the middle of its pong line.
+fn half_pong() -> Vec<u8> {
+    b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\ni|pong|fake-ca".to_vec()
 }
 
 fn leaf() -> Vec<u8> {

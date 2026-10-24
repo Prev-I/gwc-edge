@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use gwc_core::config::Config;
 use gwc_core::counters::{Key, Kind};
-use gwc_core::log::Outcome;
+use gwc_core::log::{Outcome, RATE_LIMIT_UNAVAILABLE};
 use gwc_core::policy::RateKind;
 use gwc_core::query::{self, Net, Query};
 use gwc_core::response::{Line, Refusal, get_reply, render, update_reply};
@@ -13,8 +13,9 @@ use gwc_core::snapshot::{MAX_SNAPSHOT_AGE, Snapshot};
 use gwc_core::update::{self, CachePlan, HubPlan};
 use worker::{Env, Result};
 
+use crate::limiter::{self, Admission};
 use crate::probe::Probe;
-use crate::{limiter, memo, store};
+use crate::{memo, store};
 
 /// What answering a GWC request produced, for the response and the log line.
 pub struct Answer {
@@ -27,6 +28,9 @@ pub struct Answer {
     pub snapshot: Option<&'static str>,
     /// For updates: what each part did (`gwc_core::log::RequestLine::update`).
     pub update: Option<String>,
+    /// Set when the rate limiter could not be consulted
+    /// (`gwc_core::log::RequestLine::rate_limit`).
+    pub rate_limit: Option<&'static str>,
 }
 
 /// Answer a GWebCache request. The reply is always protocol-correct: in
@@ -72,9 +76,11 @@ pub async fn handle(
     let limited = Key::new(Kind::Limited, client, https);
     // Only what can cost D1 is limited: Gnutella2 file gets and updates.
     let rate_kind = RateKind::of(&q).filter(|_| q.net == Net::Gnutella2);
-    if let Some(kind) = rate_kind
-        && !limiter::allowed(env, source, kind).await
-    {
+    let admission = match rate_kind {
+        Some(kind) => limiter::admit(env, source, kind).await,
+        None => Admission::Allowed,
+    };
+    if admission == Admission::Limited {
         // Over the limit: the same successful reply, without data or storage.
         let lines = if q.is_update() {
             update_reply(Ok(()))
@@ -83,8 +89,25 @@ pub async fn handle(
         };
         return Answer::new(&lines, limited, Outcome::RateLimited, config, None);
     }
+    let mut answer = answer(&q, key, source, now, config, env, probe).await;
+    if admission == Admission::Unchecked {
+        answer.rate_limit = Some(RATE_LIMIT_UNAVAILABLE);
+    }
+    answer
+}
+
+/// The reply to an allowed request: an update stored, or a get served.
+async fn answer(
+    q: &Query,
+    key: Key,
+    source: &str,
+    now: u64,
+    config: &Config,
+    env: &Env,
+    probe: &mut Probe,
+) -> Answer {
     if q.is_update() {
-        let stored = store_update(&q, source, now, config, env, probe).await;
+        let stored = store_update(q, source, now, config, env, probe).await;
         let outcome = if probe.failed() {
             Outcome::Degraded
         } else {
@@ -94,7 +117,7 @@ pub async fn handle(
         a.update = Some(stored);
         return a;
     }
-    let (lines, snapshot, degraded) = get_lines(&q, now, config, env, probe).await;
+    let (lines, snapshot, degraded) = get_lines(q, now, config, env, probe).await;
     let outcome = if degraded {
         Outcome::Degraded
     } else {
@@ -124,6 +147,7 @@ impl Answer {
             caches_sent,
             snapshot,
             update: None,
+            rate_limit: None,
         }
     }
 }

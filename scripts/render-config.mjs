@@ -48,6 +48,51 @@ function scan(text, comments) {
 }
 
 /**
+ * The Worker's rule for names that cannot be public (cache_url::PRIVATE_TLDS
+ * and may_be_public in crates/gwc-core/src/cache_url.rs, ADR-0017): both are
+ * tested on crates/gwc-core/testdata/hostnames.json.
+ */
+const PRIVATE_TLDS = [
+  "localhost", "test", "example", "invalid", "local", "onion", "alt", "arpa",
+  "internal", "localdomain", "lan", "home", "corp", "mail",
+];
+
+/** Whether an IPv4 address (four numbers) is public unicast, as addr::is_public_unicast. */
+function isPublic([a, b, c, d]) {
+  const n = ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+  const blocks = [
+    ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+    ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+    ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24],
+    ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
+  ];
+  return !blocks.some(([base, bits]) => {
+    const b = base.split(".").reduce((acc, o) => ((acc << 8) | Number(o)) >>> 0, 0);
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return ((n & mask) >>> 0) === ((b & mask) >>> 0);
+  });
+}
+
+/** Whether a lowercase DNS name could be public by its form (may_be_public). */
+export function mayBePublic(host) {
+  const labels = host.split(".");
+  if (PRIVATE_TLDS.includes(labels.at(-1))) return false;
+  const tokens = labels.flatMap((l) => l.split("-"));
+  const octet = (t) => (/^[0-9]{1,3}$/.test(t) && Number(t) <= 255 ? Number(t) : null);
+  for (let i = 0; i + 4 <= tokens.length; i++) {
+    const o = tokens.slice(i, i + 4).map(octet);
+    if (o.every((x) => x !== null) && !isPublic(o)) return false;
+  }
+  for (const t of tokens) {
+    if (/^[0-9a-f]{8}$/.test(t)) {
+      const n = parseInt(t, 16);
+      if (!isPublic([n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255])) return false;
+    }
+  }
+  return true;
+}
+
+/**
  * The host of a canonical URL, or an error. The rule is narrower than the
  * Worker's own (`cache_url::normalize`) and accepts only URLs it leaves
  * unchanged, so a URL that renders also passes the Worker's configuration
@@ -69,6 +114,8 @@ export function canonicalHost(url) {
   if (labels.length < 2 || !labels.every((l) => label.test(l)) || !/^[a-z]/.test(labels.at(-1))) {
     fail("must be on a lowercase DNS name");
   }
+  // The same names cache_url::normalize refuses as non-public by their form.
+  if (!mayBePublic(host)) fail("must be on a public DNS name");
   const kept = path.replace(/[./]+$/, "");
   if (path !== (path.endsWith("/") || kept === "" ? `${kept}/` : kept)) {
     fail("would be rewritten by Shareaza's clean-up (trailing . or //)");
