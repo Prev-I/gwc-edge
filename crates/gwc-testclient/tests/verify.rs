@@ -30,7 +30,10 @@ fn log_file() -> String {
 /// Run the cron once and wait for its summary line.
 fn cron(c: &Client, log: &str) {
     let from = len(log);
-    assert_eq!(c.get("/__scheduled?cron=*/10+*+*+*+*").status, 200);
+    assert_eq!(
+        c.get("/cdn-cgi/local/scheduled?cron=*/10+*+*+*+*").status,
+        200
+    );
     settle(log, from, 1, |v| v["kind"] == "cron");
 }
 

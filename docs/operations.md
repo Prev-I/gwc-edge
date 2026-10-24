@@ -11,6 +11,8 @@ running it.
 | Is it up, and is the cron running? | `GET /healthz` |
 | How many hubs and caches, how many requests, any D1 trouble? | `GET /stats`, or the landing page `GET /` |
 | What happened to one request, or in the last hour? | Workers Logs |
+| Does Shareaza still get through the zone's protections? | `scripts/smoke.sh --prod <canonical URL>`; the daily `prod-smoke` workflow, which opens an issue labelled `prod-smoke` on failure |
+| What was deployed, and did it pass its checks? | The `deploy` workflow run: migrations, deploy, then `smoke.sh --prod` |
 
 `/stats` and `request_log` are the durable record. Workers Logs is the
 debugging channel: 7 days, at most 200,000 events a day on the Free plan.
@@ -114,8 +116,13 @@ rules may answer it with a 403 or a challenge; to Shareaza that is a failure, an
 two failures delete the cache from the client.
 - Symptom: `/stats` requests fall while the cache looks healthy in a browser;
   few `hostfile` lines in the logs.
-- Check: replay a Shareaza request with `curl -A 'Shareaza 2.7.10.6' -H 'Accept:' -H 'Accept-Encoding:'`.
-- Fix: the zone settings in the README deployment guide.
+- Check: `scripts/smoke.sh --prod <canonical URL>`, which replays Shareaza's
+  four request shapes with its headers and names what is wrong (status line,
+  content type, compression, missing self line). The `prod-smoke` issue holds
+  the same output.
+- Fix: the zone settings in the README deployment guide (ADR-0014). A 301 to
+  `https://` is Always Use HTTPS; a 403 or an HTML challenge is Bot Fight
+  Mode, Browser Integrity Check, Security Level or a WAF rule.
 
 **D1 quota exhausted.** D1 fails every query until 00:00 UTC.
 - Symptom: `outcome: degraded` lines and `d1_error` lines; `/healthz` `database: error`;
@@ -160,3 +167,20 @@ two failed handshakes in a row, 10 minutes apart.
 **`TEST_DIAL` in production.** `/healthz` shows `test_dial: true` and every
 `cron_hub` line says `blocked` or names a loopback failure; nothing new is
 ever listed. Remove the variable.
+
+**Deploy fails.** The `deploy` workflow stops at the first failing step of
+`scripts/deploy.sh`.
+- At `render-config`: `GWC_CANONICAL_URL` is not a lowercase `http://` URL
+  on a DNS name, port 80, ending in a path.
+- At `d1 create` or `migrations apply`: the API token lacks D1 Edit, or the
+  account is over its database quota.
+- At `deploy`: the token lacks Workers Scripts Edit or the zone permissions
+  for the Custom Domain, or the hostname already has a DNS record (a Custom
+  Domain needs the name free).
+- At the smoke check, with the deploy itself done: zone settings, as above.
+  The script retries for two minutes first, since a new Custom Domain takes
+  a moment to answer.
+
+**A migration changed after release.** CI fails at "migrations are frozen":
+an existing file under `migrations/` no longer matches `SHA256SUMS`. Revert
+it and add a new `000N_*.sql` instead (ADR-0015).

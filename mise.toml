@@ -4,9 +4,15 @@
 [tools]
 # Stable toolchain. The wasm target is what Cloudflare Workers run;
 # llvm-tools is needed by cargo-llvm-cov.
-rust = { version = "1.99.1", components = "rustfmt,clippy,llvm-tools", targets = "wasm32-unknown-unknown" }
+# The second, dated nightly is for `cargo fuzz` only (sanitizers need it);
+# everything else builds with the stable toolchain, which stays the default.
+rust = [
+  { version = "1.99.1", components = "rustfmt,clippy,llvm-tools", targets = "wasm32-unknown-unknown" },
+  { version = "nightly-2026-10-20", profile = "minimal" },
+]
 node = "24.21.0"
 "npm:wrangler" = "4.152.0"
 "cargo:worker-build" = "0.8.7"
 cargo-deny = "0.20.2"
 "cargo:cargo-llvm-cov" = "0.9.1"
+"cargo:cargo-fuzz" = "0.13.2"

@@ -34,9 +34,18 @@ jobs:
       - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: ${{ env.MISE_VERSION }}
-          install_args: rust cargo-deny cargo:cargo-llvm-cov
+          # The stable toolchain only; the fuzz job installs the nightly.
+          install_args: rust@1.99.1 cargo-deny cargo:cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
+      - name: stable toolchain is the default (the nightly is for fuzzing only)
+        run: rustc --version | grep -q '^rustc 1\.99\.1 '
+      - name: migrations are frozen (v0.1.0 on; a change is a new, listed file)
+        working-directory: migrations
+        run: |
+          sha256sum -c SHA256SUMS
+          diff <(ls -1 *.sql) <(awk '{print $2}' SHA256SUMS | sort) \
+            || { echo "every migration must be listed in SHA256SUMS"; exit 1; }
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy (native)
@@ -76,12 +85,37 @@ jobs:
       - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: ${{ env.MISE_VERSION }}
-          install_args: rust node npm:wrangler cargo:worker-build
+          install_args: rust@1.99.1 node npm:wrangler cargo:worker-build
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: build (bundle into target/, as a deploy would)
-        run: wrangler deploy --dry-run --outdir target/wrangler-dist
+      - name: deploy scripts (render-config tests)
+        run: node --test 'scripts/*.test.mjs'
+      - name: build (render the deploy config and bundle, as a deploy would)
+        run: GWC_CANONICAL_URL=http://gwc.example.org/ scripts/deploy.sh --dry-run
       - name: smoke test (/healthz with local D1)
         run: scripts/smoke.sh
       - name: integration tests (Shareaza-shaped client against wrangler dev)
         run: scripts/integration.sh
+
+  fuzz:
+    name: fuzz corpora replay (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: rust cargo:cargo-fuzz
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+      # Every committed input, once: a parser change that breaks an invariant
+      # on an input found earlier fails here. Long runs are local
+      # (scripts/fuzz.sh).
+      - name: rustfmt (fuzz targets, outside the workspace)
+        run: rustfmt --check --edition 2024 fuzz/fuzz_targets/*.rs
+      - name: replay
+        run: scripts/fuzz.sh --replay

@@ -31,6 +31,11 @@ pub const MAX_VERSION_LEN: usize = 16;
 /// Longest `net` value kept.
 const MAX_NET_LEN: usize = 16;
 
+/// Longest query string parsed, in bytes. Shareaza's longest, an update
+/// with a 255-character cache URL, stays under 1.2 KB; refusing anything
+/// longer keeps parsing cheap within the 10 ms CPU budget.
+pub const MAX_QUERY: usize = 2048;
+
 /// The network a query without `net` names.
 const DEFAULT_NET: &str = "gnutella";
 
@@ -74,6 +79,8 @@ pub enum QueryError {
     NoCommand,
     /// `update=1` with neither `ip=` nor `url=`.
     NothingToUpdate,
+    /// Longer than [`MAX_QUERY`].
+    TooLong,
 }
 
 impl QueryError {
@@ -85,6 +92,7 @@ impl QueryError {
             QueryError::BadClient => "client needs a 4-character vendor code",
             QueryError::NoCommand => "no command",
             QueryError::NothingToUpdate => "update needs ip or url",
+            QueryError::TooLong => "query too long",
         }
     }
 }
@@ -96,6 +104,9 @@ impl QueryError {
 /// Returns a [`QueryError`] when the query names no usable client or command.
 pub fn parse(raw: &str) -> Result<Query, QueryError> {
     let raw = raw.strip_prefix('?').unwrap_or(raw);
+    if raw.len() > MAX_QUERY {
+        return Err(QueryError::TooLong);
+    }
     let mut p = Params::default();
     for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
         p.set(&key, value.into_owned());
@@ -443,12 +454,33 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_query_is_refused_before_it_is_parsed() {
+        // Shareaza's longest query, an update with a 255-character URL
+        // percent-encoded, stays under 1.2 KB.
+        let url = "a".repeat(240);
+        let longest = format!(
+            "ip=255.255.255.255:65535&x.leaves=2047&uptime=31535999&x.max=2047\
+             &url=http%3A%2F%2F{url}.example.net%2F&update=1&net=gnutella2&client=RAZA2.7.10.6"
+        );
+        assert!(longest.len() < 1_200);
+        assert!(parse(&longest).is_ok());
+        let padded = format!(
+            "{longest}&pad={}",
+            "x".repeat(MAX_QUERY - longest.len() - 5)
+        );
+        assert_eq!(padded.len(), MAX_QUERY);
+        assert!(parse(&padded).is_ok(), "the limit itself is allowed");
+        assert_eq!(parse(&format!("{padded}x")), Err(QueryError::TooLong));
+    }
+
+    #[test]
     fn error_reasons_are_short_lowercase_and_pipe_free() {
         for e in [
             QueryError::MissingClient,
             QueryError::BadClient,
             QueryError::NoCommand,
             QueryError::NothingToUpdate,
+            QueryError::TooLong,
         ] {
             let r = e.reason();
             assert!(!r.is_empty() && r.len() <= 40);

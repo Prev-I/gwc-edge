@@ -7,3 +7,5 @@
 docs/spec/*.html -text -whitespace
 docs/spec/*.txt -text -whitespace
 docs/spec/*.html linguist-documentation
+# Fuzz inputs are raw bytes: CR LF in a handshake reply is the data itself.
+fuzz/corpus/** -text -whitespace
