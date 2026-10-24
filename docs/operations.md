@@ -196,6 +196,85 @@ would cost the cache its place in their lists (ADR-0002).
 `cron_hub` line says `blocked` or names a loopback failure; nothing new is
 ever listed. Remove the variable.
 
+## Deploying safely
+
+`scripts/deploy.sh` applies the migrations, then deploys the Worker
+(ADR-0015). The deploy workflow runs it only for `main`'s tip with green CI
+on that commit (ADR-0018). Order matters, because of what can fail between
+the two steps.
+
+**Schema changes are expand, then contract.** A migration lands while the
+previous Worker is still serving, and stays if the new Worker never
+deploys. So every migration must work with the Worker already running:
+- **Expand** in one release: new tables, new nullable or defaulted columns,
+  and new CHECK values the old code never writes. In SQLite a changed CHECK
+  means rebuilding the table, which rewrites every row and its indexes:
+  count those rows against the day's write budget, and run such a migration
+  early in the UTC day.
+- **Contract** in a later release, once no deployed code reads the old shape
+  any more: dropping or renaming a column, tightening a CHECK.
+
+Migrations are frozen once released (`migrations/SHA256SUMS`): a mistake is
+fixed by a new migration, never by editing one.
+
+**When the migrations succeed but the deploy fails** (permissions, Custom
+Domain, build): production runs the previous Worker on the new schema, which
+expand-only migrations keep safe. Fix the cause and run the deploy again.
+`d1 migrations apply` skips the migrations already applied.
+
+**When the deploy succeeds but the smoke check fails:**
+- Read the output of `smoke.sh --prod`. A redirect, a challenge or
+  compression is a zone setting (README, "Zone settings"), not the code;
+  fix the zone, then run `scripts/smoke.sh --prod <url>` again.
+- A failing reply from the Worker itself is the code: roll the Worker back
+  (below), then investigate.
+
+**Rolling back.** The Worker and the database roll back separately:
+- **The Worker:** Workers & Pages → gwc-edge → Deployments, then roll back to
+  an earlier version, or `wrangler rollback`. Cloudflare keeps the 100 most
+  recent versions. "Resources connected to your Worker will not be changed
+  during a rollback": D1 keeps its schema and data, so the older code must
+  still work with them. Expand-only migrations guarantee that.
+- **The schema:** never by reverting a migration file. Write a new migration
+  that undoes the change, as a forward step.
+- **The data:** D1 Time Travel restores the whole database to a minute in
+  the last 7 days (Free plan; 30 days on Paid):
+  - `wrangler d1 time-travel info gwc-edge` gives the current bookmark;
+  - `wrangler d1 time-travel restore gwc-edge --bookmark=<bookmark>` (or
+    `--timestamp=…`) restores it.
+
+  A restore is destructive. It overwrites the database in place and cancels
+  in-flight queries, which the Worker answers in degraded mode. It returns a
+  bookmark of the state it replaced, so it can be undone.
+
+**Before a destructive migration** (anything a contract step drops or
+rewrites):
+1. note the Time Travel bookmark;
+2. export the database with
+   `wrangler d1 export gwc-edge --remote --output=backup.sql`;
+3. keep the export outside the repository.
+
+The cache's data can be rebuilt (hubs re-register within hours, and
+`scripts/seed.sh` refills an empty cache), so the export is for
+convenience. Without the bookmark, though, a bad migration costs the hours
+of rebuilding.
+
+None of this runs automatically: restores, exports and rollbacks are
+operator actions.
+
+**Deploy refused by the gate** (ADR-0018). The step "main's tip, with
+green CI?" fails with an `::error::` saying why:
+- **CI still `in_progress` or `queued`:** wait for it, then run the deploy
+  workflow again by hand on `main`.
+- **CI failed or was cancelled, or there is no CI run on main** for the
+  commit: fix CI. A commit pushed while Actions was disabled never got a
+  run; push again or re-run CI.
+- **GitHub API unavailable:** the gate fails closed; run it again later.
+- **A ref other than `main`:** only `main` deploys.
+
+A notice "no longer the tip of main" is not a failure: the newer commit's
+own run deploys it.
+
 **Deploy fails.** The `deploy` workflow stops at the first failing step of
 `scripts/deploy.sh`.
 - At `render-config`: `GWC_CANONICAL_URL` is not a lowercase `http://` URL

@@ -22,3 +22,4 @@ changed by a new record that supersedes the old one, never by editing it.
 | [0015](0015-deployment-and-frozen-migrations.md) | Deployment renders its config; migrations are frozen from v0.1.0 |
 | [0016](0016-operator-seeding.md) | Operator seeding from another cache; a re-registering hub becomes source `update` (amends 0012) |
 | [0017](0017-cache-url-names-and-dns-rebinding.md) | Cache URL names that cannot be public are refused; DNS rebinding toward clients remains |
+| [0018](0018-deploys-require-green-ci.md) | Every deploy, manual ones included, requires green CI on the exact commit (amends 0015) |
