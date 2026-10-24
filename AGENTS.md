@@ -18,6 +18,7 @@ crates/gwc-testclient/  native client that speaks exactly as Shareaza 2.7.10.6;
 migrations/         D1 migrations, applied in order by wrangler
 docs/protocol.md    the protocol authority: GWC v2 as Shareaza speaks it, with citations
 docs/adr/           one record per decision; change a decision with a new record
+docs/spec/          verbatim copies of the published GWC specs (GNU FDL), never edited; README.md is ours
 docs/operations.md  logs, /stats, /healthz, and the expected failure modes
 scripts/smoke.sh    wrangler dev + local D1 + /healthz check (also run in CI)
 scripts/integration.sh  wrangler dev + isolated seeded D1 + cron run + gwc-testclient tests

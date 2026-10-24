@@ -35,3 +35,8 @@ scripts/integration.sh               # seeded end-to-end tests, Shareaza-shaped 
 ## Licence
 
 MIT. See `LICENSE`.
+
+The exception is the copied files in `docs/spec/`: verbatim copies of the
+published GWebCache specifications, Copyright (c) 2003 Hauke Dämpfling and
+distributed under the GNU Free Documentation License 1.1, together with that
+licence's text. See `docs/spec/README.md`.
