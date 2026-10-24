@@ -2,9 +2,15 @@
   "name": "gwc-edge",
   "main": "crates/gwc-worker/build/index.js",
   "compatibility_date": "2026-10-20",
+  // One canonical URL (docs/protocol.md): no *.workers.dev address and no
+  // preview URLs. The Worker is reached only through its custom-domain route,
+  // added at deployment (README).
+  "workers_dev": false,
+  "preview_urls": false,
   "build": {
     // worker-build is pinned and installed by mise (see mise.toml).
-    "command": "cd crates/gwc-worker && worker-build --release",
+    // GWC_GIT_SHA is compiled in and shown on the landing page and /stats.
+    "command": "cd crates/gwc-worker && GWC_GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) worker-build --release",
     // wrangler watches ./src by default, which does not exist here.
     "watch_dir": ["crates/gwc-core/src", "crates/gwc-worker/src"]
   },
@@ -21,7 +27,7 @@
   "vars": {
     // This cache's public URL, exactly as clients store it: plain http://,
     // the custom domain, no alias. Replace before deploying.
-    "SELF_URL": "http://gwc.example.org/",
+    "CANONICAL_URL": "http://gwc.example.org/",
     "HOSTFILE_COUNT": "20",
     "URLFILE_COUNT": "20",
     // Comma-separated vendor codes that get no hosts. CRUX is CruxP2P.
@@ -31,5 +37,11 @@
     // Renders the hostfile snapshot (and hourly stats); verification joins later.
     "crons": ["*/10 * * * *"]
   },
-  "observability": { "enabled": true }
+  // Workers Logs: every invocation, and the one JSON line per request the
+  // Worker writes (docs/operations.md). Free plan: 200,000 events a day, 7 days.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": true }
+  }
 }

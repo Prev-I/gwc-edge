@@ -11,16 +11,12 @@ use gwc_core::stats::{ClientCount, MAX_CLIENTS, Totals};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use worker::wasm_bindgen::JsValue;
-use worker::{D1Database, D1PreparedStatement, D1Result, Env, Result};
-
-use crate::log;
+use worker::{D1Database, D1PreparedStatement, D1Result, Env, Result, console_warn};
 
 /// D1 binding name, as declared in `wrangler.jsonc`.
 pub const DB: &str = "DB";
 
-/// `snapshots.k` values.
-pub const HOSTFILE: &str = "hostfile";
-pub const STATS: &str = "stats";
+pub use gwc_core::snapshot::keys::{CRON, HOSTFILE, STATS};
 
 pub fn db(env: &Env) -> Result<D1Database> {
     env.d1(DB)
@@ -58,12 +54,14 @@ fn keep<R: DeserializeOwned, T>(
     let total = raw.len();
     let kept: Vec<T> = raw.into_iter().filter_map(convert).collect();
     if kept.len() < total {
-        log(
-            "rows_dropped",
-            &[
-                ("query", what),
-                ("dropped", &(total - kept.len()).to_string()),
-            ],
+        console_warn!(
+            "{}",
+            serde_json::json!({
+                "level": "warn",
+                "event": "rows_dropped",
+                "statement": what,
+                "dropped": total - kept.len(),
+            })
         );
     }
     Ok(kept)
@@ -135,7 +133,87 @@ pub async fn write_back_snapshot(
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
-/// When each snapshot was rendered. Reads at most 2 rows.
+/// The two documents `/stats` and the landing page are built from, `stats`
+/// and `cron`, in one query. Reads at most 2 rows.
+pub async fn read_stats_parts(db: &D1Database) -> Result<(Option<String>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct R {
+        k: String,
+        body: String,
+    }
+    let parts = rows(
+        db.prepare("SELECT k, body FROM snapshots WHERE k IN ('stats', 'cron')"),
+        "read_stats_parts",
+        |r: R| Some((r.k, r.body)),
+    )
+    .await?;
+    let find = |k: &str| {
+        parts
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, b)| b.clone())
+    };
+    Ok((find(STATS), find(CRON)))
+}
+
+/// Row counts for `/stats`, in one query and one scan per table (cron only).
+/// Servable hubs (`verified`, `alive_full`) count only inside the listing
+/// window; `unverified` and `dead` count whatever their age, since they are
+/// by definition not recently seen alive. Returns (hubs by status, all hubs,
+/// caches by status).
+pub async fn status_counts(
+    db: &D1Database,
+    window_start: u64,
+) -> Result<(Vec<(String, u64)>, u64, Vec<(String, u64)>)> {
+    #[derive(Deserialize)]
+    struct R {
+        t: String,
+        status: String,
+        current: f64,
+        n: f64,
+    }
+    let rows = rows(
+        db.prepare(
+            "SELECT 'hubs' AS t, status, \
+                    CASE WHEN status IN ('verified', 'alive_full') THEN last_seen >= ?1 ELSE 1 END \
+                    AS current, COUNT(*) AS n FROM hubs GROUP BY 1, 2, 3 \
+             UNION ALL SELECT 'caches' AS t, status, 1 AS current, COUNT(*) AS n FROM caches \
+             GROUP BY 1, 2, 3",
+        )
+        .bind(&[num(window_start)])?,
+        "status_counts",
+        |r: R| Some((r.t, r.status, r.current > 0.0, int::<u64>(r.n)?)),
+    )
+    .await?;
+    let hubs_current = rows
+        .iter()
+        .filter(|(t, _, current, _)| t == "hubs" && *current)
+        .map(|(_, s, _, n)| (s.clone(), *n))
+        .collect();
+    let hubs_total = rows
+        .iter()
+        .filter(|(t, ..)| t == "hubs")
+        .map(|(.., n)| n)
+        .sum();
+    let caches = rows
+        .iter()
+        .filter(|(t, ..)| t == "caches")
+        .map(|(_, s, _, n)| (s.clone(), *n))
+        .collect();
+    Ok((hubs_current, hubs_total, caches))
+}
+
+/// Add several counts in one batch, atomically: all or none. Writes 1 row each.
+pub async fn count_batch(db: &D1Database, hour: u64, counts: &[(Key, u32)]) -> Result<()> {
+    let stmts = counts
+        .iter()
+        .map(|(key, weight)| count_statement(db, hour, key, *weight))
+        .collect::<Result<Vec<_>>>()?;
+    db.batch(stmts).await?;
+    Ok(())
+}
+
+/// When each snapshot was rendered. Reads at most 3 rows.
 pub async fn snapshot_times(db: &D1Database) -> Result<Vec<(String, u64)>> {
     #[derive(Deserialize)]
     struct R {
@@ -224,26 +302,32 @@ pub async fn live_snapshot(db: &D1Database, now: u64) -> Result<Snapshot> {
     })
 }
 
+fn count_statement(
+    db: &D1Database,
+    hour: u64,
+    key: &Key,
+    weight: u32,
+) -> Result<D1PreparedStatement> {
+    db.prepare(
+        "INSERT INTO request_log (hour, kind, client, version, scheme, n) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT (hour, kind, client, version, scheme) DO UPDATE SET n = n + excluded.n",
+    )
+    .bind(&[
+        num(hour),
+        key.kind.as_str().into(),
+        key.client.as_str().into(),
+        key.version.as_str().into(),
+        key.scheme.into(),
+        num(u64::from(weight)),
+    ])
+}
+
 /// Add a sampled request to its hourly counter. Expected to write 1 row;
 /// returns what D1 reports, because whether an UPSERT bills 1 or 2 rows is not
 /// documented and decides the sampling rate.
 pub async fn count(db: &D1Database, hour: u64, key: &Key, weight: u32) -> Result<Option<usize>> {
-    let result = db
-        .prepare(
-            "INSERT INTO request_log (hour, kind, client, version, scheme, n) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-             ON CONFLICT (hour, kind, client, version, scheme) DO UPDATE SET n = n + excluded.n",
-        )
-        .bind(&[
-            num(hour),
-            key.kind.as_str().into(),
-            key.client.as_str().into(),
-            key.version.as_str().into(),
-            key.scheme.into(),
-            num(u64::from(weight)),
-        ])?
-        .run()
-        .await?;
+    let result = count_statement(db, hour, key, weight)?.run().await?;
     Ok(result.meta()?.and_then(|m| m.rows_written))
 }
 
@@ -274,7 +358,8 @@ pub async fn totals(db: &D1Database, first: u64, last: u64) -> Result<Totals> {
             .bind(&window)?,
             db.prepare(format!(
                 "SELECT client, version, SUM(n) AS n FROM request_log \
-                 WHERE hour BETWEEN ?1 AND ?2 GROUP BY client, version \
+                 WHERE hour BETWEEN ?1 AND ?2 AND kind NOT IN ('d1_error', 'degraded') \
+                 GROUP BY client, version \
                  ORDER BY n DESC, client, version LIMIT {MAX_CLIENTS}"
             ))
             .bind(&window)?,

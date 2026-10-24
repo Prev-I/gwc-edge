@@ -297,15 +297,28 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
 
 ## What gwc-edge emits
 
-**Every response:**
+**Which requests are protocol requests** (`route::classify`):
+- A request is a GWC request if and only if its query carries one of `get`,
+  `ping`, `update`, `ip`, `url`, `hostfile` or `urlfile`, even with an empty
+  value. Headers are never consulted: Shareaza sends no `Accept`.
+- A GWC request is answered on `/` and on the canonical path, on **any** host.
+  A redirect there would make the URL a client stores diverge from the `u|` line
+  this cache lists for itself.
+- Without GWC parameters, `/` is the HTML landing page on the canonical host,
+  and a 301 to the canonical URL on any other host. `/stats`, `/healthz` and
+  `/robots.txt` are fixed paths. `HEAD` is answered like `GET` without a body;
+  any other method gets 405 with an empty body. See ADR-0008.
+
+**Every GWC response:**
 - HTTP `200 OK`, `Content-Type: text/plain; charset=utf-8`,
   `Cache-Control: no-store, no-transform`.
 - The body is ASCII, with every line ending in `\n`, the last one included.
 - Lines start only with `h|`, `u|` or `i|`.
 
 **This cache's own URL:**
-- It is one canonical `http://` URL, a `CacheUrl` from `cache_url::normalize`,
-  and it is served identically everywhere.
+- It is one canonical `http://` URL: the `CANONICAL_URL` variable, validated by
+  `cache_url::normalize` (the Worker answers 500 without a valid one). It is
+  served identically everywhere.
 - It must match the address clients stored, case-insensitively, for the
   "known URL" path at `DS:138` to apply.
 - An alias such as `*.workers.dev` beside the custom domain would break this.
@@ -325,6 +338,11 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
   - **Caches:** `u|url|age` lines.
 - **Any other network:** only the self line. There are no hosts (we have none
   for G1), and no pong, which a G1 query treats as a failure (`DS:1641-1646`).
+- **A ping without a get** gets the pong on any network, so no allowed client
+  ever receives an empty body. Shareaza never sends one: its G1 queries carry
+  no ping, and its G2 pings always come with a get.
+- **Degraded mode** (D1 failed, ADR-0007): the same replies, built from no
+  data, or from hubs the isolate still remembers.
 - **Rate-limited gets:** answered as above with no hosts and no caches, and no
   D1 read. That means the pong if it was asked for, plus the self line.
 - **Rate-limit keys:** the source address and the request type (hostfile,
@@ -417,6 +435,7 @@ gives what `gwc-edge` does. "Approved" means the project owner decided it.
 | 10 | Unknown or malformed query → `i\|error\|<reason>`, HTTP 200. | Non-2xx is a failure (`HR:142-145`), and an empty reason phrase fails even a 200 (`HR:262-265`). | HTTP `200 OK` always. | consistent |
 | 11 | Rate-limited get → `i\|update\|WARNING\|too many requests`, 1 get / 30 s per IP. | That reply adds nothing, so it is a failure. A single client sends hostfile and urlfile back to back (`DS:1340-1352`). | Limited per (address, request type), IPv6 by /64. Over the limit, the reply is the pong if asked plus the self `u\|` line, with no D1 read. | **approved** |
 | 12 | Hubs register with their IP. | A hub behind NAT may report a private address (`Network.m_pHost`). | Not stored, answered `OK` (#3). | **approved** (with #3) |
+| 13 | Never an empty body for an allowed client (brief addendum). | A pong on a G1 get is a failure (`DS:1641-1646`). | A ping without a get gets a pong on any network; G1 gets still get none. | **approved** |
 
 ## Test coverage of these findings
 

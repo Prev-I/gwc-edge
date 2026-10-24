@@ -7,6 +7,7 @@
 //! | 8.8.4.4:6346 | `verified`, RAZA, 120/300 leaves, up 2.5 h | 120 s ago | served second, extended fields |
 //! | 9.9.9.9:6346 | `unverified` | now | not served |
 //! | 8.8.8.8:6346 | `verified` | 8000 s ago | expired, not served |
+//! | 9.9.9.10:6346 | `dead` | 86000 s ago | not served, counted as dead |
 //!
 //! Caches: dkac verified 600 s ago (served), `pending.example.org` (not).
 //!
@@ -20,7 +21,8 @@ fn client() -> Client {
 }
 
 fn self_line() -> String {
-    let url = std::env::var("GWC_SELF_URL").expect("GWC_SELF_URL (run scripts/integration.sh)");
+    let url =
+        std::env::var("GWC_CANONICAL_URL").expect("GWC_CANONICAL_URL (run scripts/integration.sh)");
     format!("u|{url}|0")
 }
 
@@ -138,7 +140,8 @@ fn denylisted_client_gets_an_empty_body() {
 #[test]
 #[ignore = "needs a running cache: scripts/integration.sh"]
 fn malformed_query_is_a_200_error_line() {
-    let r = client().get("?");
+    // GWC parameters but no client: the protocol path, answered in-band.
+    let r = client().get("?get=1&hostfile=1");
     assert_plain_200(&r);
     assert_eq!(r.lines(), ["i|error|client required"]);
 }
@@ -164,10 +167,25 @@ fn stats_reports_live_counts() {
     assert_eq!(r.status, 200);
     assert_eq!(r.content_type.as_deref(), Some("application/json"));
     let json: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-    assert_eq!(json["live_hubs"], 2);
-    assert_eq!(json["live_caches"], 1);
+    assert_eq!(json["schema"], 1);
+    assert_eq!(json["hubs"]["served"], 2);
+    assert_eq!(
+        json["hubs"]["verified"], 1,
+        "8.8.4.4; the expired 8.8.8.8 is not current"
+    );
+    assert_eq!(json["hubs"]["alive_full"], 1);
+    assert_eq!(json["hubs"]["unverified"], 1);
+    assert_eq!(
+        json["hubs"]["dead"], 1,
+        "dead hubs count whatever their age"
+    );
+    assert_eq!(json["hubs"]["total"], 5);
+    assert_eq!(json["caches"]["verified"], 1);
+    assert_eq!(json["caches"]["pending"], 1);
     assert_eq!(json["sample_rate"], 8);
     assert!(json["requests"]["by_kind"]["hostfile"].is_u64());
+    assert!(json["cron"]["last_run_at"].as_u64().unwrap() > 0);
+    assert_eq!(json["health"]["d1_errors_24h"], 0);
 }
 
 #[test]

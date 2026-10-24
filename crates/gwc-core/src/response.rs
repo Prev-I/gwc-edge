@@ -178,7 +178,7 @@ pub fn render(lines: &[Line]) -> String {
 ///   no pong, which a G1 query treats as a failure (`:1641-1646`). An empty
 ///   reply would get this cache removed for G2 as well, since removal deletes
 ///   the whole entry.
-/// - The pong is sent only on G2 and only when asked for.
+/// - The pong is sent only when asked for: on G2, or for a ping without a get.
 /// - A rate-limited get is answered by calling this with no hosts and no
 ///   caches: Shareaza still counts it a success, and no D1 row is read.
 /// - `self_url` is not repeated if it is also among `caches`.
@@ -190,8 +190,12 @@ pub fn get_reply(
     self_url: &CacheUrl,
 ) -> Vec<Line> {
     let g2 = q.net == Net::Gnutella2;
+    let files = q.hostfile || q.urlfile;
     let mut lines = Vec::new();
-    if g2 && q.ping {
+    // A pong on a G1 *get* is a failure to Shareaza (:1641-1646); a ping
+    // without a get, which Shareaza never sends, gets one on any network so
+    // no allowed client ever receives an empty body.
+    if q.ping && (g2 || !files) {
         lines.push(Line::Pong);
     }
     if g2 && q.hostfile {
@@ -206,7 +210,7 @@ pub fn get_reply(
                 .map(Line::Url),
         );
     }
-    if q.hostfile || q.urlfile {
+    if files {
         lines.push(Line::Url(UrlEntry {
             url: self_url.url.clone(),
             age: 0,
@@ -541,6 +545,14 @@ mod tests {
         assert!(!get_reply(&q, &[host(1)], &[], &self_url()).contains(&Line::Pong));
         let g1_ping = parse("get=1&hostfile=1&ping=1&net=gnutella&client=RAZA").unwrap();
         assert!(!get_reply(&g1_ping, &[], &[], &self_url()).contains(&Line::Pong));
+    }
+
+    #[test]
+    fn ping_without_get_gets_a_pong_on_any_network() {
+        // Never an empty body for an allowed client (addendum A2). Shareaza
+        // never sends a G1 ping, and a G1 *get* still gets no pong.
+        let q = parse("ping=1&net=gnutella&client=TEST&version=0.1").unwrap();
+        assert_eq!(get_reply(&q, &[host(1)], &[], &self_url()), [Line::Pong]);
     }
 
     #[test]
