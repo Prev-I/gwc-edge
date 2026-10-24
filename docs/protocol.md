@@ -459,6 +459,22 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
   `HR:253-257`).
 - **Pong:** HTTP `200` and a line `i|pong|<name>[|<networks>]` whose networks,
   when present, include `gnutella2` (split on `-`).
+- **When the reply is judged** (`ping::Reader`):
+  - at once, when the status line is malformed or the status is not 200;
+  - as soon as a complete pong line, ended by CR or LF, has arrived;
+  - over a socket, when the body reaches its `Content-Length` and a line end
+    follows its last line. If anything else follows, the length cut the
+    line and there is no pong. `fetch()` delimits the body itself, so its
+    `Content-Length` is not used;
+  - otherwise when the peer closes, when 16 KiB arrive without a verdict
+    (no pong), or when the 10 s deadline passes (no pong).
+
+  A cache that keeps its connection open after replying is not failed for
+  it, provided its pong line ends with CR or LF, or its `Content-Length`
+  frames the body (then the deadline completes the last line); a last line
+  with neither may still have been arriving, and is no pong. Half a pong
+  line is never taken for one. The work is linear in the reply's length, so
+  a peer trickling its reply costs the cron little.
 - **Result:** a pong makes the cache `verified` and served. A failure makes it
   `failed` (not served, pinged again after an hour); three in a row delete it.
   A verified cache is pinged again every 6 hours. At most 2 pings a run.

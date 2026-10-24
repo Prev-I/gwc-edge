@@ -60,7 +60,7 @@ async fn talk(
     request: &[u8],
     max: usize,
     ms: u64,
-    done: impl Fn(&[u8]) -> bool,
+    mut done: impl FnMut(&[u8]) -> bool,
 ) -> (Result<Vec<u8>, Failure>, Leak) {
     let Ok(mut socket) = Socket::builder()
         .secure_transport(SecureTransport::Off)
@@ -102,7 +102,11 @@ pub async fn handshake(host: &str, port: u16) -> (Exchange, Leak) {
         request.as_bytes(),
         handshake::MAX_REPLY,
         HANDSHAKE_TIMEOUT_MS,
-        |b| !matches!(handshake::parse_reply(b), Parse::Incomplete),
+        {
+            // Linear in the reply's length, however it is trickled.
+            let mut watch = handshake::ReplyWatch::default();
+            move |b: &[u8]| watch.settled(b)
+        },
     )
     .await;
     let exchange = match bytes {
@@ -119,27 +123,47 @@ pub async fn handshake(host: &str, port: u16) -> (Exchange, Leak) {
 }
 
 /// Ping a cache over a socket: plain HTTP/1.0, no redirects. Returns the
-/// cache's pong name, if it answered one.
+/// cache's pong name, if it answered one. Reading stops as soon as the reply
+/// is judged (`ping::Reader`): a cache that answers and keeps the connection
+/// open is not left to the deadline.
 pub async fn ping_socket(host: &str, port: u16, request: &str) -> (Option<String>, Leak) {
+    let mut reader = ping::Reader::new();
+    let mut verdict = None;
     let (bytes, leak) = talk(
         host,
         port,
         request.as_bytes(),
         PING_BODY_MAX,
         PING_TIMEOUT_MS,
-        |_| false,
+        |b: &[u8]| {
+            verdict = reader.feed(b);
+            verdict.is_some()
+        },
     )
     .await;
-    let pong = bytes.ok().and_then(|bytes| {
-        let (status, body) = ping::http_reply(&bytes)?;
-        ping::pong(status, body)
-    });
+    let pong = match (bytes, verdict) {
+        // Settled while reading.
+        (Ok(_), Some(verdict)) => verdict.pong(),
+        // Stopped at the size limit: judge what arrived, the last chunk
+        // included, but never as a closed reply.
+        (Ok(bytes), None) if bytes.len() > PING_BODY_MAX => {
+            reader.feed(&bytes).and_then(ping::Verdict::pong)
+        }
+        // The peer closed: whatever arrived is the whole reply.
+        (Ok(bytes), None) => reader.close(&bytes),
+        // The deadline, or the connection failed mid-reply: a body that had
+        // reached its Content-Length still counts.
+        (Err(_), _) => reader.at_deadline(),
+    };
     (pong, leak)
 }
 
 /// Ping a cache with `fetch()`. Redirects are not followed, as over a socket:
 /// each hop would be another subrequest, and a URL that only redirects is
-/// not the cache it names. Reads at most [`PING_BODY_MAX`] bytes of the body.
+/// not the cache it names. Reads at most [`PING_BODY_MAX`] bytes of the body
+/// and stops as soon as the reply is judged (`ping::Reader`). The runtime
+/// delimits the body itself, so `Content-Length` is not used: it may count
+/// the compressed bytes of a body the runtime has already decoded.
 pub async fn ping_fetch(url: &str) -> Option<String> {
     within(PING_TIMEOUT_MS, async {
         let headers = Headers::new();
@@ -150,17 +174,22 @@ pub async fn ping_fetch(url: &str) -> Option<String> {
             .with_redirect(RequestRedirect::Manual);
         let request = Request::new_with_init(url, &init).ok()?;
         let mut response = Fetch::Request(request).send().await.ok()?;
-        let status = response.status_code();
+        let mut reader = ping::Reader::body(response.status_code());
         let mut stream = response.stream().ok()?;
         let mut body = Vec::new();
-        while body.len() < PING_BODY_MAX {
+        loop {
+            if let Some(verdict) = reader.feed(&body) {
+                return verdict.pong();
+            }
+            if body.len() > PING_BODY_MAX {
+                return None;
+            }
             match stream.next().await {
                 Some(Ok(chunk)) => body.extend_from_slice(&chunk),
                 Some(Err(_)) => return None,
-                None => break,
+                None => return reader.close(&body),
             }
         }
-        ping::pong(status, &body)
     })
     .await
     .flatten()

@@ -12,7 +12,7 @@
 # Usage: scripts/integration.sh      (needs mise tools on PATH)
 # Env:   GWC_PORT       port for wrangler dev (default 18789); the degraded
 #                       Worker uses the next port
-#        GWC_FAKE_PORT  first of the fake peers' 9 ports (default GWC_PORT + 10)
+#        GWC_FAKE_PORT  first of the fake peers' 11 ports (default GWC_PORT + 10)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -36,6 +36,11 @@ test_dial+=",dkac.trillinux.org=127.0.0.1:$((fake_port + 3))"
 test_dial+=",ping.example.net=127.0.0.1:$((fake_port + 3))"
 test_dial+=",sock.example.net=127.0.0.1:$((fake_port + 3))"
 test_dial+=",redirect.example.net=127.0.0.1:$((fake_port + 7))"
+# Caches that keep the connection open after replying: a full pong (over a
+# socket and through fetch) and half a pong line.
+test_dial+=",linger.example.net=127.0.0.1:$((fake_port + 9))"
+test_dial+=",lingerfetch.example.net=127.0.0.1:$((fake_port + 9))"
+test_dial+=",halfpong.example.net=127.0.0.1:$((fake_port + 10))"
 # The advertised URL, passed explicitly so the tests do not depend on the
 # value a deployer puts in wrangler.jsonc.
 self_url="http://gwc.example.org/"
@@ -72,7 +77,7 @@ for b in "$base" "$degraded_base"; do
     exit 1
   fi
 done
-for p in $(seq "$fake_port" $((fake_port + 8))); do
+for p in $(seq "$fake_port" $((fake_port + 10))); do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     echo "port $p is already in use; set GWC_FAKE_PORT" >&2
     exit 1
