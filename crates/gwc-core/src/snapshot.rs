@@ -13,6 +13,7 @@
 //! u|<url>|<last_verified>
 //! ```
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::SocketAddrV4;
 
@@ -37,6 +38,12 @@ pub const LIST_WINDOW: u64 = 2 * 60 * 60;
 /// A snapshot older than this is not trusted: the cron that renders it has
 /// stalled, and the hostfile is built from a live read instead.
 pub const MAX_SNAPSHOT_AGE: u64 = 30 * 60;
+
+/// Most hubs in one reply from the same /24.
+pub const PER_SLASH_24: usize = 1;
+
+/// Most hubs in one reply from the same /16.
+pub const PER_SLASH_16: usize = 4;
 
 /// Tolerated clock skew: a `last_seen` this far in the future counts as now.
 const SKEW: u64 = 5 * 60;
@@ -153,12 +160,28 @@ impl Snapshot {
     }
 
     /// Hubs to serve at `now`: seen within [`LIST_WINDOW`], newest first, at
-    /// most `n`.
+    /// most `n`, and at most [`PER_SLASH_24`] per /24 and [`PER_SLASH_16`] per
+    /// /16 (ADR-0011), so many addresses close together cannot fill a reply.
     #[must_use]
     pub fn hosts(&self, now: u64, n: usize) -> Vec<HostEntry> {
         let mut live: Vec<&SnapHub> = self.hubs.iter().filter(|h| is_live(h, now)).collect();
         live.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.addr.cmp(&b.addr)));
+        let mut per_24: HashMap<u32, usize> = HashMap::new();
+        let mut per_16: HashMap<u32, usize> = HashMap::new();
         live.into_iter()
+            .filter(|h| {
+                let ip = u32::from(*h.addr.ip());
+                let (in_24, in_16) = (
+                    per_24.entry(ip >> 8).or_default(),
+                    per_16.entry(ip >> 16).or_default(),
+                );
+                if *in_24 >= PER_SLASH_24 || *in_16 >= PER_SLASH_16 {
+                    return false;
+                }
+                *in_24 += 1;
+                *in_16 += 1;
+                true
+            })
             .take(n)
             .map(|h| HostEntry {
                 addr: h.addr,
@@ -213,9 +236,11 @@ mod tests {
 
     const NOW: u64 = 1_792_744_200;
 
+    /// A hub in its own /24 (`8.8.<n>.4`), so the diversity cap stays out of
+    /// the way unless a test wants it.
     fn hub(last_byte: u8, last_seen: u64) -> SnapHub {
         SnapHub {
-            addr: SocketAddrV4::new(Ipv4Addr::new(8, 8, 4, last_byte), 6346),
+            addr: SocketAddrV4::new(Ipv4Addr::new(8, 8, last_byte, 4), 6346),
             last_seen,
             leaves: None,
             vendor: None,
@@ -271,8 +296,8 @@ mod tests {
             sample().render(),
             format!(
                 "gwc-edge-snapshot 1 {}\n\
-                 h|8.8.4.1:6346|{}|120|RAZA|{}|300\n\
-                 h|8.8.4.2:6346|{}||||\n\
+                 h|8.8.1.4:6346|{}|120|RAZA|{}|300\n\
+                 h|8.8.2.4:6346|{}||||\n\
                  u|http://dkac.trillinux.org/dkac/dkac.php|{}\n",
                 NOW - 60,
                 NOW - 100,
@@ -347,11 +372,53 @@ mod tests {
         let ages: Vec<(u8, u64)> = s
             .hosts(NOW, 10)
             .iter()
-            .map(|h| (h.addr.ip().octets()[3], h.age))
+            .map(|h| (h.addr.ip().octets()[2], h.age))
             .collect();
         assert_eq!(ages, [(5, 0), (3, 10), (1, 300), (4, LIST_WINDOW - 1)]);
         assert_eq!(s.hosts(NOW, 2).len(), 2);
         assert_eq!(s.live_hubs(NOW), 4);
+    }
+
+    fn hub_at(a: u8, b: u8, c: u8, d: u8, last_seen: u64) -> SnapHub {
+        SnapHub {
+            addr: SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), 6346),
+            ..hub(1, last_seen)
+        }
+    }
+
+    #[test]
+    fn a_reply_holds_one_hub_per_slash_24_and_four_per_slash_16() {
+        // ADR-0011: many addresses close together cannot fill a reply.
+        let mut hubs = vec![
+            hub_at(9, 9, 9, 1, NOW - 1),
+            hub_at(9, 9, 9, 2, NOW - 2), // same /24 as .1: skipped
+            hub_at(9, 9, 1, 1, NOW - 3),
+            hub_at(9, 9, 2, 1, NOW - 4),
+            hub_at(9, 9, 3, 1, NOW - 5), // 4th in 9.9/16
+            hub_at(9, 9, 4, 1, NOW - 6), // 5th in 9.9/16: skipped
+            hub_at(8, 8, 8, 8, NOW - 7),
+        ];
+        hubs.reverse(); // input order must not matter
+        let s = Snapshot {
+            rendered_at: NOW,
+            hubs,
+            caches: vec![],
+        };
+        let served: Vec<String> = s
+            .hosts(NOW, 20)
+            .iter()
+            .map(|h| h.addr.ip().to_string())
+            .collect();
+        assert_eq!(
+            served,
+            ["9.9.9.1", "9.9.1.1", "9.9.2.1", "9.9.3.1", "8.8.8.8"]
+        );
+        assert_eq!(s.hosts(NOW, 2).len(), 2, "the count still applies");
+        assert_eq!(
+            s.live_hubs(NOW),
+            7,
+            "the cap shapes replies, not what is live"
+        );
     }
 
     #[test]
@@ -367,7 +434,7 @@ mod tests {
     #[test]
     fn host_fields_and_uptime_at_serve_time() {
         let h = &sample().hosts(NOW, 10)[1];
-        assert_eq!(h.addr.ip().octets()[3], 1);
+        assert_eq!(h.addr.ip().octets()[2], 1);
         assert_eq!(h.age, 100);
         assert_eq!(h.leaves, Some(120));
         assert_eq!(h.vendor.as_deref(), Some("RAZA"));

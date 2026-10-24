@@ -9,10 +9,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-ureq.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true

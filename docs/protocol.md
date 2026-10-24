@@ -330,7 +330,8 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
 - **G2:**
   - **Pong:** `i|pong|gwc-edge <version>|gnutella2`, sent only when `ping=1` was
     given.
-  - **Hosts:** `h|ip:port|age` lines, newest first.
+  - **Hosts:** `h|ip:port|age` lines, newest first, at most 1 per /24 and 4
+    per /16 in one reply (ADR-0011).
     - Extended fields are filled only when they pass Shareaza's checks: leaves
       and leaf limit 0..2047, uptime 61 s..1 year, vendor 4 alphanumerics and not
       `foxy`.
@@ -362,8 +363,8 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
   - That covers accepted, merged and rate-limited updates, and ones we decline
     to store: a NAT or private address, a port below 1024, a third-party cache
     URL we do not keep, a G1 update from a dual-mode hub.
-  - Each part of a combined `ip=` + `url=` update will be judged separately
-    (phase 4). The reply is the same either way.
+  - Each part of a combined `ip=` + `url=` update is judged separately (see
+    "What gwc-edge stores"). The reply is the same either way.
   - The period line comes first, because Shareaza stops reading at `OK`.
   - 3600 is Shareaza's own default. Each hub is gated globally to one update an
     hour anyway (`DS:863`), so a lower value would only raise this cache's share.
@@ -415,6 +416,34 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
     normalising them.
   - Continuation lines are appended rather than replacing the value.
   - Entries must pass the hub-address rules. At most 50 are kept.
+
+## What gwc-edge stores
+
+Every update is answered the same way (above); what it stores is decided part
+by part (`gwc_core::update`, ADR-0010):
+
+| Part | Stored when | As | Never stored |
+|---|---|---|---|
+| `ip=` | Gnutella2, a public IPv4 with port 1024..65535, **and the request comes from that address** (`CF-Connecting-IP`) | an `unverified` hub, source `update`, listed after the cron's first successful handshake (ADR-0011) | from any other address: not even as `unverified`; private, reserved or CGNAT addresses; low ports; G1 |
+| `url=` | Gnutella2, a valid `http://` URL (see "Cache URLs" above), not this cache, fewer than 3 already for its host, fewer than 50 in all | a `pending` cache, not served until the cron has pinged it | `https://`, this cache's own URL, invalid URLs, G1 |
+
+- Hubs enter `hubs` with a source other than their own address only as
+  `X-Try-Hubs` candidates found by the verifying cron: source `try_hubs`,
+  status `unverified`, not served until a handshake succeeds.
+- At most 500 hubs and 50 caches. Of the hubs, at most 150 may be
+  `X-Try-Hubs` candidates awaiting a handshake; self-registered hubs awaiting
+  one count only against the 500.
+- A hub that reaches the cache over IPv6 while claiming its IPv4 is not
+  stored: the addresses differ (ADR-0010).
+- `url=` on this cache's own host and port is never stored, whatever the path:
+  every path there reaches this cache.
+- A hub's row is written at most once per 30 minutes by its own updates,
+  whatever its status or port. After that, a listed hub on the same port is
+  refreshed; on a new port it returns to `unverified`; an `unverified` or
+  `dead` hub is queued again for the cron. Only the cron lists a hub.
+- Rate limits: 2 gets per 60 s per source and kind (hostfile and urlfile
+  separately), 1 update per 60 s per source; over the limit the reply is the
+  same, without data or storage.
 
 ## Deviations from the written spec
 

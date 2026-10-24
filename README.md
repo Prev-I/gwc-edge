@@ -8,11 +8,12 @@ hubs register themselves, and clients ask it for recent hubs and for other
 caches. Compatibility target is Shareaza 2.7.x, which runs on almost every G2
 hub today.
 
-**Status:** under construction. The read path works: `ping`, hostfile and
-urlfile gets served from a cron-rendered snapshot, a landing page at `/`,
-`/stats`, `/healthz` and `/robots.txt`, with a degraded mode that keeps
-answering correctly when D1 fails. Hub registration, verification, the
-deployment guide and the field-test plan arrive in later phases.
+**Status:** under construction. Reads and writes work: `ping`, hostfile and
+urlfile gets served from a cron-rendered snapshot, hub registration and cache
+submission with per-source rate limits and caps, a landing page at `/`,
+`/stats`, `/healthz` and `/robots.txt`, and a degraded mode that keeps
+answering correctly when D1 fails. Handshake verification, the deployment
+guide and the field-test plan arrive in later phases.
 
 - `docs/protocol.md`: the protocol, as Shareaza speaks it.
 - `docs/adr/`: the decisions behind the design.

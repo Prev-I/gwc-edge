@@ -9,8 +9,9 @@ debugging channel; D1 (`request_log`, `/stats`) is the durable record.
 ## Decision
 - Exactly one JSON line per request, on every path: `kind`, `client`,
   `version`, `scheme`, `outcome` (`ok`, `rate_limited`, `denied`, `degraded`,
-  `malformed`), `hosts_sent`, `caches_sent`, `d1_ms`, `cf_colo`, and `snapshot`
-  when a hostfile was needed. Non-protocol routes use log-only kinds (`page`,
+  `malformed`), `hosts_sent`, `caches_sent`, `d1_ms`, `cf_colo`, `snapshot`
+  when a hostfile was needed, and `update` (what each part of an update did,
+  as labels) for updates. Non-protocol routes use log-only kinds (`page`,
   `stats`, `healthz`, `robots`, `redirect`, `method_not_allowed`, `not_found`,
   `config_error`, `internal_error`).
 - No line carries the requester's address.

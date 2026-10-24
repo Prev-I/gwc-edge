@@ -33,6 +33,12 @@
     // Comma-separated vendor codes that get no hosts. CRUX is CruxP2P.
     "CLIENT_DENYLIST": "CRUX"
   },
+  // Rate limiting (ADR-0005): per source and kind, no D1 writes. The
+  // namespace ids only need to be unique within the Cloudflare account.
+  "ratelimits": [
+    { "name": "GET_LIMITER", "namespace_id": "4801", "simple": { "limit": 2, "period": 60 } },
+    { "name": "UPDATE_LIMITER", "namespace_id": "4802", "simple": { "limit": 1, "period": 60 } }
+  ],
   "triggers": {
     // Renders the hostfile snapshot (and hourly stats); verification joins later.
     "crons": ["*/10 * * * *"]
