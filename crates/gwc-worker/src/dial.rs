@@ -6,8 +6,10 @@
 //! otherwise hangs for as long as the runtime allows. Any failure, at any
 //! stage, is a failed check; refused and unreachable are not told apart.
 
+use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
+use std::rc::Rc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -16,12 +18,15 @@ use gwc_core::handshake::{self, Exchange, Parse};
 use gwc_core::ping;
 use gwc_core::verify::{HANDSHAKE_TIMEOUT_MS, PING_BODY_MAX, PING_TIMEOUT_MS};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use worker::wasm_bindgen_futures::spawn_local;
 use worker::{
-    Delay, Fetch, Headers, Method, Request, RequestInit, RequestRedirect, SecureTransport, Socket,
+    Date, Delay, Fetch, Headers, Method, Request, RequestInit, RequestRedirect, SecureTransport,
+    Socket,
 };
 
-/// How long closing a socket may take: closing one to an unreachable address
-/// can hang too, and the connection slot is only free once it is closed.
+/// How long closing a socket may take. The runtime closes a socket only once
+/// its connection attempt has settled (ADR-0019), so closing one whose
+/// connect is still pending, to an address that drops it, waits for that.
 const CLOSE_TIMEOUT_MS: u64 = 1_000;
 
 /// Run `f`, or give up after `ms` milliseconds.
@@ -46,10 +51,20 @@ enum Failure {
     Timeout,
 }
 
-/// What a socket exchange left behind: whether its close timed out, in which
-/// case the runtime may still count the connection as open.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Leak(pub bool);
+/// What a socket exchange left behind: the close, if it timed out. The
+/// runtime may count the connection as open until it completes, so the cron
+/// stops counting on that slot, and learns when it ends (ADR-0019).
+#[derive(Default)]
+pub struct Leak(pub Option<PendingClose>);
+
+/// A socket close still in progress, running as a task of its own so that
+/// the moment it completes is recorded when it happens.
+pub struct PendingClose {
+    /// When the socket's connect was called.
+    pub connected_ms: u64,
+    /// When the close completed; `None` while it is pending.
+    pub closed_ms: Rc<Cell<Option<u64>>>,
+}
 
 /// Connect to `host:port`, send `request`, and read until `done` says the
 /// bytes so far are enough, the peer closes, or `max` bytes arrived; all
@@ -62,11 +77,12 @@ async fn talk(
     ms: u64,
     mut done: impl FnMut(&[u8]) -> bool,
 ) -> (Result<Vec<u8>, Failure>, Leak) {
+    let connected_ms = Date::now().as_millis();
     let Ok(mut socket) = Socket::builder()
         .secure_transport(SecureTransport::Off)
         .connect(host, port)
     else {
-        return (Err(Failure::Unreachable), Leak(false));
+        return (Err(Failure::Unreachable), Leak::default());
     };
     let outcome = within(ms, async {
         write_all(&mut socket, request).await?;
@@ -83,8 +99,25 @@ async fn talk(
     })
     .await;
     // The slot is free only once the socket is closed; bounded as well, and
-    // reported when it timed out, so the caller can stop counting on it.
-    let leak = Leak(within(CLOSE_TIMEOUT_MS, socket.close()).await.is_none());
+    // handed back when it timed out, so the caller can stop counting on it.
+    let mut close = Box::pin(async move {
+        let _ = socket.close().await;
+    });
+    let leak = if within(CLOSE_TIMEOUT_MS, &mut close).await.is_some() {
+        Leak(None)
+    } else {
+        // Finish the close as a task of its own, which notes when it ends.
+        let closed_ms = Rc::new(Cell::new(None));
+        let done = Rc::clone(&closed_ms);
+        spawn_local(async move {
+            close.await;
+            done.set(Some(Date::now().as_millis()));
+        });
+        Leak(Some(PendingClose {
+            connected_ms,
+            closed_ms,
+        }))
+    };
     let result = match outcome {
         None => Err(Failure::Timeout),
         Some(Err(_)) => Err(Failure::Unreachable),
