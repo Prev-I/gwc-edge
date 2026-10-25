@@ -90,6 +90,7 @@ cache inserts.
   `alive_full` and `dead`;
 - one `cron_hub` line per hub, with `class: "new"`;
 - one `cron_cache` line per cache pinged, 2 a run;
+- a `cron_leaks` line after any run that completes with leaked sockets;
 - on `/stats`, `hubs.served`.
 
 `/stats` also carries the last run's `cron` figures, the same fields as the
@@ -104,8 +105,13 @@ cache inserts.
     'http://gwc.example.org/?get=1&hostfile=1&net=gnutella2&ping=1&client=RAZA2.7.10.6'
   ```
 
-- the `cron` line shows `verification_failed: false`, `subrequests` at most
-  45, and `leaked_sockets: 0`.
+- the `cron` line shows `verification_failed: false` and `subrequests` at
+  most 45;
+- **leaked sockets only where expected** (ADR-0019):
+  - `leaked_sockets` is at most the run's `cron_hub` lines with `result:
+    "timeout"`, plus its `caches_failed`;
+  - `skipped_budget` is above 0 only when `leaked_sockets` reached 5 or
+    `subrequests` reached 45.
 
 ## Stage 2: Shareaza as a leaf
 
@@ -247,7 +253,7 @@ Leave the cache running for a week. Then look at the following:
 | Requests | `/stats` `requests` | mostly `RAZA` or `RAZI` hostfile and urlfile gets; `limited` and `denied` small |
 | D1 health | `/stats` `health` | `d1_errors_24h` and `degraded_responses_24h` at 0 |
 | D1 budget | Cloudflare dashboard → D1 → gwc-edge → Metrics | rows written well under 100,000 a day (expected about 5,000); rows read under 5 million |
-| Cron cost | `cron` log lines | `ms` under 60,000; `subrequests` under 45, which also settles whether sockets count as subrequests; `leaked_sockets` 0; `skipped_budget` 0 |
+| Cron cost | `cron`, `cron_hub` and `cron_leaks` log lines | `ms` under 60,000 (the wait for leaked sockets comes after it, in `cron_leaks` `waited_ms`); `subrequests` under 45, which also settles whether sockets count as subrequests; `leaked_sockets` and `skipped_budget` only as stage 1 allows (ADR-0019) |
 | CPU | Workers & Pages → gwc-edge → Metrics | CPU time per invocation well under 10 ms, cron included |
 | Logs | Workers Logs | no `cron_failed`, `internal_error` or unexpected `d1_error` lines |
 
@@ -272,7 +278,7 @@ keep it answering: a deploy that serves no hubs still keeps its place.
 
 | Stage | Date | Result | Notes (counts, anomalies, links to logs) |
 |---|---|---|---|
-| 1. Seed | 2026-10-25 | Not passed (`leaked_sockets`) | 11 hubs and 19 caches seeded from dkac (counted in the seed file; the caches match `/stats`). Cron runs at 20:50, 21:00 and 21:10 UTC: `picked` 11, 16, 15; `verified` 5, 0, 7; `alive_full` 4, 1, 5; `dead` 2, 5, 3; `deleted` 0, 5, 3; `candidates_added` 19, 2, 15; `subrequests` 37, 42, 41; `verification_failed` false throughout. After the first run a G2 hostfile get listed 9 hubs; after the third `hubs.served` was 22. Caches: 4 verified, 2 failed, 13 pending. **Not passing:** `leaked_sockets` was 1, then 5, then 0. With 5 leaked, the second run left 10 hubs for later (`skipped_budget` 10). Every other criterion held. Find the cause before stage 2. |
+| 1. Seed | 2026-10-25 | Not passed under the first `leaked_sockets` criterion; pending under ADR-0019 | 11 hubs and 19 caches seeded from dkac (counted in the seed file; the caches match `/stats`). Cron runs at 20:50, 21:00 and 21:10 UTC: `picked` 11, 16, 15; `verified` 5, 0, 7; `alive_full` 4, 1, 5; `dead` 2, 5, 3; `deleted` 0, 5, 3; `candidates_added` 19, 2, 15; `subrequests` 37, 42, 41; `verification_failed` false throughout. After the first run a G2 hostfile get listed 9 hubs; after the third `hubs.served` was 22. Caches: 4 verified, 2 failed, 13 pending. **Not passing:** `leaked_sockets` was 1, then 5, then 0. With 5 leaked, the second run left 10 hubs for later (`skipped_budget` 10). Every other criterion held. Cause found (ADR-0019): a socket whose connection never opened cannot be closed early. The 21:30 and 21:40 runs, the first logged per hub, meet the new criterion: 5 leaked sockets for 5 timeouts, with 2 hubs skipped once all 5 slots had leaked; then 2 for 2, none skipped. The earlier runs were not logged per hub. To confirm over three runs with `cron_leaks` lines. |
 | 2. Leaf | | | |
 | 3. Hub | | | |
 | 4. Announce | | | |
