@@ -235,9 +235,14 @@ If no line matched rule 1, the update **fails** (`DS:1942`). This includes every
 - A success, or any added host, resets the count (`DS:2375-2380`, `DS:2396-2399`).
 - Separately, a cache with one or more failures stops receiving updates until it
   succeeds again (`DS:1192`).
-- **Network flags:** a cache added without a protocol, as a user's
-  `Discovery → Add` does, is flagged G1 *and* G2 (`DS:231-234`, `DS:247-253`).
-  Shareaza then sends it G1 gets as well, whenever G1 is enabled.
+- **Network flags:** a cache added without a protocol is flagged G1 *and* G2
+  (`DS:231-234`, `DS:247-253`). A `gwc:` link adds a cache that way
+  (`DlgURLAction.cpp:315`). Shareaza then sends it G1 gets as well, whenever
+  G1 is enabled.
+  - The Discovery window's **Add Service…** dialog is different: it sets the
+    protocol from its Type field (`DlgDiscoveryService.cpp:141-157`).
+  - That field starts on *G1 GWebCache* (`DlgDiscoveryService.cpp:105`), so
+    a user who keeps the default adds the cache for G1 only.
 
 So two bad answers in a row to the same client lose that client, on every
 network.

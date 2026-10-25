@@ -99,9 +99,10 @@ The committed `wrangler.jsonc` is never edited. The script renders
 
 ### 3. Zone settings
 
-Until the cron's first run, within 10 minutes of the first deploy, `/healthz`
-answers 503 with `"cron":"never_run"`. The deploy script accepts that; the
-daily check does not.
+Until the cron's first run, `/healthz` answers 503 with `"cron":"never_run"`.
+After a first deploy that run can take longer than the 10-minute schedule
+suggests: 17 minutes on 2026-10-25 (`docs/field-test-plan.md`). The deploy
+script accepts that; the daily check does not.
 
 Several Cloudflare zone features reject or rewrite Shareaza's requests.
 Shareaza sends no `Accept` and no `Accept-Encoding` header. It treats a
