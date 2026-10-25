@@ -1,8 +1,8 @@
 # Field test plan
 
 How to prove that a deployed `gwc-edge` works for real Shareaza clients and
-hubs, and how to bring it into the G2 network. This is a plan: nothing here
-has been run against production yet.
+hubs, and how to bring it into the G2 network. Stage 1 was first run against
+production on 2026-10-25; the table at the end records what each stage found.
 
 Each stage has:
 - what to do;
@@ -18,13 +18,26 @@ fails, and use `docs/operations.md` to find out why.
   `scripts/smoke.sh --prod <canonical URL>` passes.
 - [ ] **`/healthz`** shows `"status":"ok"`, `"cron":"ok"` and
   `"test_dial":false`.
+  - After the very first deploy, the cron trigger can take a while to start:
+    on 2026-10-25 the first run came 17 minutes after the deploy.
+  - Until then `/healthz` reports `"cron":"never_run"` (`"pending"` if
+    nothing has been requested yet) and `/stats` answers 503. Wait for the
+    first run before stage 1.
 - [ ] **The `prod-smoke` workflow** is green, if you deploy from GitHub.
 - [ ] **Workers Logs are open:** Workers & Pages → gwc-edge → Observability.
   Also open the `/stats` page.
-- [ ] **A Windows machine or VM with Shareaza 2.7.10.x.** For stage 3 you also
-  need:
-  - a public IPv4 address, not behind carrier-grade NAT;
-  - one TCP port forwarded to it (Shareaza's default is 6346).
+- [ ] **A Windows machine or VM with Shareaza 2.7.10.x.**
+  - Prefer the official 2.7.10.2, which most of the G2 network runs and
+    which sends `client=RAZA`.
+  - The `docs/ORACLE.md` of github.com/Prev-I/Shareaza covers running
+    2.7.10.2 and that fork's 2.7.10.6 under Wine on Linux. WSL2 is untested
+    there.
+  - The 2.7.10.6 build sends `client=RAZI`, not `RAZA`. The same document
+    warns that it has known security flaws. Stage 3 keeps the client running
+    as a public hub for hours: stay with it, or use 2.7.10.2.
+  - For stage 3 you also need:
+    - a public IPv4 address, not behind carrier-grade NAT;
+    - one TCP port forwarded to it (Shareaza's default is 6346).
 - [ ] **A backup of Shareaza's `Discovery.dat`** (in Shareaza's data folder),
   so you can restore the client's own cache list afterwards.
 
@@ -40,6 +53,15 @@ GWC_CANONICAL_URL=http://gwc.example.org/ scripts/seed.sh fetch seed.sql
 less seed.sql                       # review: one INSERT per hub and cache
 scripts/seed.sh apply seed.sql      # stores exactly that file
 ```
+
+`apply` writes to the deployed D1, so wrangler must be authenticated on the
+machine that runs it:
+- either `wrangler login`;
+- or `CLOUDFLARE_API_TOKEN` (with D1 Edit) and `CLOUDFLARE_ACCOUNT_ID` in the
+  environment.
+
+The deploy workflow's token lives only in GitHub and cannot be used here.
+A `seed.sql` at the repository root is git-ignored.
 
 The script:
 - **Asks `dkac` once each** for its G2 hostfile and urlfile, in `fetch`.
@@ -59,7 +81,9 @@ The script:
     cache is not interrupted. If `apply` reports an error, nothing was
     stored: fix the cause and run it again on the same file.
 
-A read-only dry run on 2026-10-24 found 11 hubs and 20 caches.
+A read-only dry run on 2026-10-24 found 11 hubs and 20 caches. The
+production fetch on 2026-10-25 got the same counts and wrote 11 hub and 19
+cache inserts.
 
 **Watch**, over the next three cron runs (30 minutes):
 - the `cron` log line: `picked` near 11 at first, then `verified`,
@@ -67,6 +91,9 @@ A read-only dry run on 2026-10-24 found 11 hubs and 20 caches.
 - one `cron_hub` line per hub, with `class: "new"`;
 - one `cron_cache` line per cache pinged, 2 a run;
 - on `/stats`, `hubs.served`.
+
+`/stats` also carries the last run's `cron` figures, the same fields as the
+`cron` log line, so the counters can be followed without the logs.
 
 **Passing:**
 - at least one seeded hub is `verified` or `alive_full`;
@@ -84,20 +111,25 @@ A read-only dry run on 2026-10-24 found 11 hubs and 20 caches.
 
 This checks that a client which knows only this cache can bootstrap from it.
 
-The windows named below are those of Shareaza 2.7's Advanced mode; menu
-names may differ slightly between builds.
+The menu paths below are those of Shareaza 2.7's windowed mode. In the
+tabbed mode most of these windows are under **View → Advanced** instead.
+Menu names may differ slightly between builds.
 
 1. **Close Shareaza.** Back up `Discovery.dat` if you have not yet.
 2. **Start Shareaza with G2 only:** turn off Gnutella, eDonkey and the
    others in the network settings.
-3. **Make this cache the only one.** Open the Discovery window (View →
-   Discovery) and remove the other GWebCaches. Remove the UDP host caches
+3. **Make this cache the only one.** Open the Discovery window (F9, or
+   View → Discovery). Remove the other GWebCaches, and the UDP host caches
    too (UKHL entries), which also hand out hubs.
-4. **Add this cache.** Use Add, choose the GWebCache type and enter the
+4. **Add this cache.** Right-click in the Discovery window and choose
+   **Add Service…**. Set **Type** to **G2 GWebCache**, then enter the
    canonical URL exactly.
-   - Shareaza's Add sets no network: it flags the cache for G1 and G2 alike
-     (`docs/protocol.md`, "Failures and removal").
-   - With G1 off since step 2, only G2 queries are sent.
+   - **The dialog starts on *G1 GWebCache*.** Left there, the cache is
+     flagged G1 only (`docs/protocol.md`, "Failures and removal"). With
+     G1 off since step 2, Shareaza would then never ask it.
+   - *G1/G2 GWebCache* also works: with G1 off, only G2 queries are sent.
+     A `gwc:` link adds the cache that way (`docs/protocol.md`, "Failures
+     and removal").
 5. **Empty the host cache** (View → Host Cache, then clear it), so that
    Shareaza has to ask a cache for hubs.
 6. **Check the list again.** Just before connecting, make sure the Discovery
@@ -108,9 +140,9 @@ names may differ slightly between builds.
 **Watch:**
 - **Workers Logs:** within a minute, a `hostfile` line, then a `urlfile`
   line right after it. Shareaza sends the urlfile query only while it knows
-  fewer than 10 caches. Both lines should have `client: "RAZA"`, the
-  Shareaza version, `outcome: "ok"`, and for the hostfile `hosts_sent`
-  above 0.
+  fewer than 10 caches. Both lines should have `client: "RAZA"` (`"RAZI"`
+  for the 2.7.10.6 fork), the Shareaza version, `outcome: "ok"`, and for
+  the hostfile `hosts_sent` above 0.
 - **Shareaza's Discovery window:** this cache's access count goes up, and its
   failure count stays at 0. Two failures in a row remove a cache from
   Shareaza's list, entirely.
@@ -190,8 +222,9 @@ the reply is not an `OK`, wait an hour before trying again.
 
 **Watch:**
 - **dkac's verification ping:** soon afterwards, a `ping` request line in
-  this cache's logs whose `client` is not `RAZA`. The logs never carry the
-  requester's address, so the client code is how dkac's request shows.
+  this cache's logs whose `client` is neither `RAZA` nor `RAZI`. The logs
+  never carry the requester's address, so the client code is how dkac's
+  request shows.
 - **dkac's listing:** later, this cache in dkac's urlfile:
 
   ```bash
@@ -211,7 +244,7 @@ Leave the cache running for a week. Then look at the following:
 | Uptime as Shareaza sees it | `prod-smoke` workflow, `/healthz` | green every day; `status: ok`, `cron: ok` |
 | Hubs listed | `/stats` `hubs.served` | close to the G2 network's hub count (about 35, http://crawler.doxu.org/) |
 | `dead` rows | `/stats` `hubs.dead` | stable or slowly varying; not climbing towards 1,000 |
-| Requests | `/stats` `requests` | mostly `RAZA` hostfile and urlfile gets; `limited` and `denied` small |
+| Requests | `/stats` `requests` | mostly `RAZA` or `RAZI` hostfile and urlfile gets; `limited` and `denied` small |
 | D1 health | `/stats` `health` | `d1_errors_24h` and `degraded_responses_24h` at 0 |
 | D1 budget | Cloudflare dashboard → D1 → gwc-edge → Metrics | rows written well under 100,000 a day (expected about 5,000); rows read under 5 million |
 | Cron cost | `cron` log lines | `ms` under 60,000; `subrequests` under 45, which also settles whether sockets count as subrequests; `leaked_sockets` 0; `skipped_budget` 0 |
@@ -239,7 +272,7 @@ keep it answering: a deploy that serves no hubs still keeps its place.
 
 | Stage | Date | Result | Notes (counts, anomalies, links to logs) |
 |---|---|---|---|
-| 1. Seed | | | |
+| 1. Seed | 2026-10-25 | Not passed (`leaked_sockets`) | 11 hubs and 19 caches seeded from dkac (counted in the seed file; the caches match `/stats`). Cron runs at 20:50, 21:00 and 21:10 UTC: `picked` 11, 16, 15; `verified` 5, 0, 7; `alive_full` 4, 1, 5; `dead` 2, 5, 3; `deleted` 0, 5, 3; `candidates_added` 19, 2, 15; `subrequests` 37, 42, 41; `verification_failed` false throughout. After the first run a G2 hostfile get listed 9 hubs; after the third `hubs.served` was 22. Caches: 4 verified, 2 failed, 13 pending. **Not passing:** `leaked_sockets` was 1, then 5, then 0. With 5 leaked, the second run left 10 hubs for later (`skipped_budget` 10). Every other criterion held. Find the cause before stage 2. |
 | 2. Leaf | | | |
 | 3. Hub | | | |
 | 4. Announce | | | |

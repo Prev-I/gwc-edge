@@ -38,7 +38,8 @@ pub fn render(page: &Page) -> String {
          <p>Bootstraps Gnutella2 clients: hubs register here; clients ask for recent \
          hubs and for other caches.</p></header>\
          <h2>Add this cache to Shareaza</h2><p><code>{}</code></p>\
-         <p class=\"m\">In Shareaza: Discovery → Add, type GWebCache. Keep <b>http://</b>: \
+         <p class=\"m\">In Shareaza: Discovery → right-click → Add Service…, Type: G2 GWebCache. \
+         Keep <b>http://</b>: \
          Shareaza 2.7 cannot use https://.</p>",
         esc(&crate::product_id()),
         esc(page.git_sha),
