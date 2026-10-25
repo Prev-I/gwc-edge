@@ -44,6 +44,39 @@ pub const PURGE_BATCH: u64 = 100;
 /// Most handshakes per run.
 pub const HANDSHAKES_PER_RUN: usize = 16;
 
+/// How long a run waits, once its work is done, for the sockets whose close
+/// timed out, to learn how long they hold a connection (ADR-0019). Wall
+/// time, not CPU: the run is only waiting.
+pub const LEAK_WAIT_MS: u64 = 30_000;
+
+/// What became of a run's leaked sockets (ADR-0019): for each one that
+/// closed before the wait ended, how long its connection stayed open, from
+/// the connect call to the end of the close; and how many were still open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeakReport {
+    pub open_ms: Vec<u64>,
+    pub unsettled: u64,
+    pub waited_ms: u64,
+}
+
+impl LeakReport {
+    /// The `cron_leaks` log line, open times sorted.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut open_ms = self.open_ms.clone();
+        open_ms.sort_unstable();
+        serde_json::json!({
+            "kind": "cron_leaks",
+            "leaked": open_ms.len() as u64 + self.unsettled,
+            "settled": open_ms.len(),
+            "open_ms": open_ms,
+            "unsettled": self.unsettled,
+            "waited_ms": self.waited_ms,
+        })
+        .to_string()
+    }
+}
+
 /// Handshakes in flight at once: the runtime allows 6 open connections.
 pub const HANDSHAKE_CONCURRENCY: usize = 5;
 
@@ -499,5 +532,49 @@ mod tests {
     fn class_labels_are_stable() {
         let labels: Vec<_> = Class::ALL.iter().map(|c| c.as_str()).collect();
         assert_eq!(labels, ["new", "recheck", "returning", "candidate"]);
+    }
+
+    fn leak_line(r: &LeakReport) -> serde_json::Value {
+        serde_json::from_str(&r.to_json()).unwrap()
+    }
+
+    #[test]
+    fn a_leak_report_sorts_open_times_and_counts_both_outcomes() {
+        let report = LeakReport {
+            open_ms: vec![21_400, 1_250, 9_800],
+            unsettled: 2,
+            waited_ms: 30_000,
+        };
+        assert_eq!(
+            leak_line(&report),
+            serde_json::json!({
+                "kind": "cron_leaks",
+                "leaked": 5,
+                "settled": 3,
+                "open_ms": [1_250, 9_800, 21_400],
+                "unsettled": 2,
+                "waited_ms": 30_000,
+            })
+        );
+    }
+
+    #[test]
+    fn a_leak_report_with_nothing_settled_still_names_what_it_waited_for() {
+        let report = LeakReport {
+            open_ms: vec![],
+            unsettled: 1,
+            waited_ms: LEAK_WAIT_MS,
+        };
+        let line = leak_line(&report);
+        assert_eq!(line["leaked"], 1);
+        assert_eq!(line["settled"], 0);
+        assert_eq!(line["open_ms"], serde_json::json!([]));
+        assert_eq!(line["waited_ms"], LEAK_WAIT_MS);
+    }
+
+    #[test]
+    fn the_leak_wait_fits_well_inside_the_cron_wall_time() {
+        // 15 minutes of wall time per cron invocation; the wait costs no CPU.
+        const { assert!(LEAK_WAIT_MS <= 60_000) };
     }
 }

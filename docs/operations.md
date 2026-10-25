@@ -59,7 +59,8 @@ No line carries the requester's address.
   `deleted` (failed `X-Try-Hubs` candidates), `candidates_added`, `purged`
   and `evicted` (`dead` rows removed), `caches_pinged`, `caches_verified`,
   `caches_failed`, `skipped_budget` (picked but not dialled), `leaked_sockets`
-  (sockets whose close timed out; each shrinks the run's concurrency),
+  (sockets whose close timed out, usually because their connection never
+  opened; each shrinks the run's concurrency, ADR-0019),
   `verification_failed` (the verification's D1 work failed: see the
   `d1_error` line; nothing it decided was stored), `subrequests`
   (counted against the run's ceiling of 45), `test_dial`, `ms`,
@@ -73,6 +74,12 @@ No line carries the requester's address.
   passed a check it is `null`, since that address is only a requester's.
 - `{"kind":"cron_cache",…}`: one per cache pinged: `url`, `result`
   (`verified`, `failed`, `deleted`).
+- `{"kind":"cron_leaks",…}`: after the `cron` line of a run that completes
+  with leaked sockets (ADR-0019): `leaked`, `settled`, `open_ms` (for each
+  close that completed, how long its connection stayed open, from the
+  connect call, sorted; never below about 9,000, the handshake deadline
+  plus the close timeout), `unsettled` (still open when the wait ended),
+  `waited_ms` (about 30,000 at most).
 - `{"kind":"cron_trace",…}`: only with `GWC_TRACE=1`: each hub's full reply
   status and headers. Off by default. Not written for a hub whose `ip` is
   `null`: its headers can carry its address (`Listen-IP`).
@@ -145,6 +152,11 @@ counts against a ceiling of 45 of the 50 the Free plan allows.
   hubs and pings left out because sockets leaked (`leaked_sockets` above 0):
   closes that timed out may hold connection slots. Hubs skipped that way
   still count in `subrequests`, which is charged before dialling.
+  - A leak follows a handshake or ping whose connection never opened. The
+    runtime cannot close such a socket until the attempt fails (ADR-0019).
+  - Leaks up to the run's `timeout` results plus its `caches_failed` are
+    expected; more is a bug.
+  - The `cron_leaks` line says how long they stayed open.
 - Effect: the hubs left over wait for the next run (10 minutes).
 - Fix: compare `subrequests` with the 50 limit; the queue's reserved shares
   (`gwc_core::verify::Class::reserved`) and `HANDSHAKES_PER_RUN` set the load.

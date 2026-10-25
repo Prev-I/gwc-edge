@@ -5,7 +5,9 @@
 //!    `dead` rows (one batch);
 //! 4. render the hostfile snapshot and the cron summary every run, and the
 //!    hourly stats once an hour, reconciling the cap counters (one batch),
-//!    after step 3 so the hostfile lists the hubs just verified.
+//!    after step 3 so the hostfile lists the hubs just verified;
+//! 5. wait a little for the sockets whose close timed out, and log how long
+//!    they took (ADR-0019).
 //!
 //! The budget is counted, not timed: every socket, fetch and D1 statement is
 //! one subrequest against `verify::SUBREQUEST_CEILING`.
@@ -18,9 +20,11 @@ use gwc_core::snapshot::{LIST_WINDOW, Snapshot};
 use gwc_core::stats::{self, CronRun, CronSummary, Hourly};
 use gwc_core::update::{MAX_HUBS, MAX_UNVERIFIED};
 use gwc_core::verify::{
-    self, CacheAction, Checked, HANDSHAKE_CONCURRENCY, HANDSHAKES_PER_RUN, HubAction, Ledger,
+    self, CacheAction, Checked, HANDSHAKE_CONCURRENCY, HANDSHAKES_PER_RUN, HubAction, LEAK_WAIT_MS,
+    LeakReport, Ledger,
 };
-use worker::{D1Database, Date, Env, Result, console_error, console_log};
+use std::time::Duration;
+use worker::{D1Database, Date, Delay, Env, Result, console_error, console_log};
 
 use crate::dial;
 use crate::store::{self, CachePing, CronWrites, HubVerdict, QueuedHub};
@@ -45,6 +49,7 @@ pub async fn run(env: &Env) -> Result<()> {
         test_dial: config.as_ref().is_ok_and(|c| c.test_dial.is_some()),
         ..CronRun::default()
     };
+    let mut leaks = Vec::new();
 
     // Verification needs a valid configuration (TEST_DIAL above all). It
     // never stops the snapshots: a D1 error here is logged, and the run goes
@@ -53,7 +58,7 @@ pub async fn run(env: &Env) -> Result<()> {
         ledger.spend(store::QUEUE_STATEMENTS);
         let applied = match store::cron_queue(&db, now).await {
             Ok(queue) => {
-                let writes = verify(&queue, now, config, &mut ledger, &mut run).await;
+                let writes = verify(&queue, now, config, &mut ledger, &mut run, &mut leaks).await;
                 store::apply_cron(&db, now, &writes)
                     .await
                     .map_err(|e| ("apply_cron", e))
@@ -113,7 +118,36 @@ pub async fn run(env: &Env) -> Result<()> {
     }
 
     log_run(&snap, now, &summary, hourly.is_some());
+    report_leaks(leaks).await;
     Ok(())
+}
+
+/// How often the wait for leaked sockets looks at them.
+const LEAK_POLL_MS: u64 = 250;
+
+/// Wait, up to [`LEAK_WAIT_MS`], for the sockets whose close timed out, and
+/// log how long each connection stayed open, from its connect call to the
+/// end of its close (ADR-0019). Each close records its own end as it
+/// happens; this only waits. After every write, so the wait delays nothing
+/// but the end of the invocation.
+async fn report_leaks(leaks: Vec<dial::PendingClose>) {
+    if leaks.is_empty() {
+        return;
+    }
+    let started = Date::now().as_millis();
+    let elapsed = || Date::now().as_millis().saturating_sub(started);
+    while elapsed() < LEAK_WAIT_MS && leaks.iter().any(|p| p.closed_ms.get().is_none()) {
+        Delay::from(Duration::from_millis(LEAK_POLL_MS)).await;
+    }
+    let report = LeakReport {
+        open_ms: leaks
+            .iter()
+            .filter_map(|p| Some(p.closed_ms.get()?.saturating_sub(p.connected_ms)))
+            .collect(),
+        unsettled: leaks.iter().filter(|p| p.closed_ms.get().is_none()).count() as u64,
+        waited_ms: elapsed(),
+    };
+    console_log!("{}", report.to_json());
 }
 
 /// Where to dial for a target, or `None` when `TEST_DIAL` blocks it.
@@ -132,6 +166,7 @@ async fn verify(
     config: &Config,
     ledger: &mut Ledger,
     run: &mut CronRun,
+    leaks: &mut Vec<dial::PendingClose>,
 ) -> CronWrites {
     let mut writes = CronWrites::default();
     // Room under the live cap. A `dead` hub that passes its check becomes
@@ -139,7 +174,8 @@ async fn verify(
     // before dialling: one that cannot be promoted waits in its queue,
     // unpenalised (ADR-0012). Candidates get what they leave.
     let mut room = MAX_HUBS.saturating_sub(queue.hubs_live);
-    let (mut offered, returning) = check_hubs(queue, room, config, ledger, run, &mut writes).await;
+    let (mut offered, returning) =
+        check_hubs(queue, room, config, ledger, run, leaks, &mut writes).await;
     room = room.saturating_sub(returning);
     // A candidate that failed in this run is not offered back in the same run.
     offered.retain(|(a, _)| !writes.deletes.contains(&a.ip().to_string()));
@@ -150,7 +186,7 @@ async fn verify(
         verify::candidates(offered, now, usize::try_from(room).unwrap_or(usize::MAX));
     // After the handshakes, so their sockets are closed: 6 connections at most.
     for cache in &queue.caches {
-        if let Some(ping) = ping_cache(cache, config, ledger, run).await {
+        if let Some(ping) = ping_cache(cache, config, ledger, run, leaks).await {
             writes.caches.push(ping);
         }
     }
@@ -169,6 +205,7 @@ async fn check_hubs(
     config: &Config,
     ledger: &mut Ledger,
     run: &mut CronRun,
+    leaks: &mut Vec<dial::PendingClose>,
     writes: &mut CronWrites,
 ) -> (Vec<(std::net::SocketAddrV4, Option<u64>)>, u64) {
     let mut queues = queue.hubs.clone();
@@ -206,11 +243,11 @@ async fn check_hubs(
                         let (exchange, leak) = dial::handshake(&host, port).await;
                         (class, hub, Some(exchange), leak)
                     }
-                    None => (class, hub, None, dial::Leak(false)),
+                    None => (class, hub, None, dial::Leak::default()),
                 }
             });
         for (class, hub, exchange, leak) in futures_util::future::join_all(wave).await {
-            run.leaked_sockets += u64::from(leak.0);
+            note_leak(run, leaks, leak);
             results.push((class, hub, exchange));
         }
     }
@@ -276,6 +313,7 @@ async fn ping_cache(
     config: &Config,
     ledger: &mut Ledger,
     run: &mut CronRun,
+    leaks: &mut Vec<dial::PendingClose>,
 ) -> Option<CachePing> {
     let (host, _, request) = ping::socket_request(&cache.url);
     let dial = config.dial(&host);
@@ -285,16 +323,16 @@ async fn ping_cache(
         return None;
     }
     let (pong, leak) = match (dial, ping::via(&cache.url)) {
-        (Dial::Blocked, _) => (None, dial::Leak(false)),
+        (Dial::Blocked, _) => (None, dial::Leak::default()),
         // TEST_DIAL: the same method, aimed at the mapped loopback address.
         (Dial::Mapped(a), Via::Fetch(_)) => (
             dial::ping_fetch(&ping::fetch_url_at(&cache.url, a)).await,
-            dial::Leak(false),
+            dial::Leak::default(),
         ),
         (Dial::Mapped(a), Via::Socket { .. }) => {
             dial::ping_socket(&a.ip().to_string(), a.port(), &request).await
         }
-        (Dial::Direct, Via::Fetch(url)) => (dial::ping_fetch(&url).await, dial::Leak(false)),
+        (Dial::Direct, Via::Fetch(url)) => (dial::ping_fetch(&url).await, dial::Leak::default()),
         (
             Dial::Direct,
             Via::Socket {
@@ -304,7 +342,7 @@ async fn ping_cache(
             },
         ) => dial::ping_socket(&host, port, &request).await,
     };
-    run.leaked_sockets += u64::from(leak.0);
+    note_leak(run, leaks, leak);
     run.caches_pinged += 1;
     let action = verify::after_ping(cache.failures, pong);
     let result = match action {
@@ -329,6 +367,15 @@ async fn ping_cache(
         url: cache.url.clone(),
         action,
     })
+}
+
+/// Count a socket whose close timed out, and keep its close for
+/// [`report_leaks`].
+fn note_leak(run: &mut CronRun, leaks: &mut Vec<dial::PendingClose>, leak: dial::Leak) {
+    if let Some(pending) = leak.0 {
+        run.leaked_sockets += 1;
+        leaks.push(pending);
+    }
 }
 
 /// Sockets whose close timed out so far in this run.
