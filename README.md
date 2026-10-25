@@ -1,4 +1,4 @@
-# rs-gwc-edge
+# gwc-edge
 
 `gwc-edge` is a Gnutella2 Web Cache (GWebCache v2) written in Rust. It runs on
 the Cloudflare Workers Free plan and stores its state in Cloudflare D1.
@@ -49,7 +49,7 @@ This takes about 15 minutes on a free Cloudflare account. You need:
 - **This repository and the tools a deploy needs**, at their pinned versions:
 
   ```bash
-  git clone https://github.com/Prev-I/rs-gwc-edge && cd rs-gwc-edge
+  git clone https://github.com/Prev-I/gwc-edge && cd gwc-edge
   mise trust && mise install rust@1.99.1 node npm:wrangler cargo:worker-build
   ```
 
