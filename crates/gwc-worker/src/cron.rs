@@ -21,7 +21,7 @@ use gwc_core::stats::{self, CronRun, CronSummary, Hourly};
 use gwc_core::update::{MAX_HUBS, MAX_UNVERIFIED};
 use gwc_core::verify::{
     self, CacheAction, Checked, HANDSHAKE_CONCURRENCY, HANDSHAKES_PER_RUN, HubAction, LEAK_WAIT_MS,
-    LeakReport, Ledger,
+    LeakReport, Ledger, SLOT_WAIT_MS,
 };
 use std::time::Duration;
 use worker::{D1Database, Date, Delay, Env, Result, console_error, console_log};
@@ -136,15 +136,20 @@ async fn report_leaks(leaks: Vec<dial::PendingClose>) {
     }
     let started = Date::now().as_millis();
     let elapsed = || Date::now().as_millis().saturating_sub(started);
-    while elapsed() < LEAK_WAIT_MS && leaks.iter().any(|p| p.closed_ms.get().is_none()) {
+    while elapsed() < LEAK_WAIT_MS && leaks.iter().any(|p| p.closed.get().is_none()) {
         Delay::from(Duration::from_millis(LEAK_POLL_MS)).await;
     }
+    let closed: Vec<(u64, dial::Closed)> = leaks
+        .iter()
+        .filter_map(|p| Some((p.connected_ms, p.closed.get()?)))
+        .collect();
     let report = LeakReport {
-        open_ms: leaks
+        open_ms: closed
             .iter()
-            .filter_map(|p| Some(p.closed_ms.get()?.saturating_sub(p.connected_ms)))
+            .map(|(connected, c)| c.at_ms.saturating_sub(*connected))
             .collect(),
-        unsettled: leaks.iter().filter(|p| p.closed_ms.get().is_none()).count() as u64,
+        close_errors: closed.iter().filter(|(_, c)| !c.ok).count() as u64,
+        unsettled: (leaks.len() - closed.len()) as u64,
         waited_ms: elapsed(),
     };
     console_log!("{}", report.to_json());
@@ -194,9 +199,10 @@ async fn verify(
 }
 
 /// Handshake with the picked hubs in waves of [`HANDSHAKE_CONCURRENCY`].
-/// A socket whose close timed out may still hold a connection slot, so each
-/// leaked socket shrinks the next waves; with no slot left, the rest wait for
-/// the next run. Returning (`dead`) hubs are picked only up to `room`.
+/// A socket whose close timed out holds a connection slot until its close
+/// completes, so it shrinks the waves meanwhile; with no slot left after
+/// [`SLOT_WAIT_MS`], the rest wait for the next run (ADR-0020). Returning
+/// (`dead`) hubs are picked only up to `room`.
 /// Returns the `X-Try-Hubs` entries offered by hubs that passed, and how many
 /// returning hubs were picked.
 async fn check_hubs(
@@ -229,7 +235,7 @@ async fn check_hubs(
     let mut results: Vec<(verify::Class, QueuedHub, Option<Exchange>)> = Vec::new();
     let mut jobs = jobs.into_iter().peekable();
     while jobs.peek().is_some() {
-        let slots = HANDSHAKE_CONCURRENCY.saturating_sub(leaked(run));
+        let slots = free_slots(leaks, HANDSHAKE_CONCURRENCY, run).await;
         if slots == 0 {
             run.skipped_budget += jobs.count() as u64;
             break;
@@ -317,8 +323,11 @@ async fn ping_cache(
 ) -> Option<CachePing> {
     let (host, _, request) = ping::socket_request(&cache.url);
     let dial = config.dial(&host);
-    // A socket that leaked may still hold a slot; keep one free for the ping.
-    if dial != Dial::Blocked && (leaked(run) > HANDSHAKE_CONCURRENCY || !ledger.try_take()) {
+    // The ping may use the sixth connection, unless leaked sockets still
+    // closing hold every one.
+    if dial != Dial::Blocked
+        && (free_slots(leaks, HANDSHAKE_CONCURRENCY + 1, run).await == 0 || !ledger.try_take())
+    {
         run.skipped_budget += 1;
         return None;
     }
@@ -378,9 +387,26 @@ fn note_leak(run: &mut CronRun, leaks: &mut Vec<dial::PendingClose>, leak: dial:
     }
 }
 
-/// Sockets whose close timed out so far in this run.
-fn leaked(run: &CronRun) -> usize {
-    usize::try_from(run.leaked_sockets).unwrap_or(usize::MAX)
+/// Leaked sockets that may still hold a connection slot: their close has
+/// not completed, or it failed (ADR-0020).
+fn open_leaks(leaks: &[dial::PendingClose]) -> usize {
+    leaks.iter().filter(|p| p.holds_slot()).count()
+}
+
+/// Connections free out of `limit`. When leaked sockets hold them all, wait
+/// up to [`SLOT_WAIT_MS`] for one of their closes to complete (ADR-0020).
+/// The wait costs wall time only, and is added to `slot_wait_ms`.
+async fn free_slots(leaks: &[dial::PendingClose], limit: usize, run: &mut CronRun) -> usize {
+    let started = Date::now().as_millis();
+    loop {
+        let free = verify::slots(limit, open_leaks(leaks));
+        let waited = Date::now().as_millis().saturating_sub(started);
+        if free > 0 || waited >= SLOT_WAIT_MS {
+            run.slot_wait_ms += waited;
+            return free;
+        }
+        Delay::from(Duration::from_millis(LEAK_POLL_MS)).await;
+    }
 }
 
 /// The address to log for a checked hub. A listing may be logged (addendum
@@ -484,6 +510,7 @@ fn log_run(snap: &Snapshot, now: u64, summary: &CronSummary, stats_rendered: boo
         "caches_failed": r.caches_failed,
         "skipped_budget": r.skipped_budget,
         "leaked_sockets": r.leaked_sockets,
+        "slot_wait_ms": r.slot_wait_ms,
         "verification_failed": r.verification_failed,
         "subrequests": r.subrequests,
         "test_dial": r.test_dial,
