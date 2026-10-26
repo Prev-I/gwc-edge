@@ -51,10 +51,13 @@ pub const LEAK_WAIT_MS: u64 = 30_000;
 
 /// What became of a run's leaked sockets (ADR-0019): for each one that
 /// closed before the wait ended, how long its connection stayed open, from
-/// the connect call to the end of the close; and how many were still open.
+/// the connect call to the end of the close; how many of those closes failed
+/// (their slot was never counted free again, ADR-0020); and how many were
+/// still open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeakReport {
     pub open_ms: Vec<u64>,
+    pub close_errors: u64,
     pub unsettled: u64,
     pub waited_ms: u64,
 }
@@ -70,6 +73,7 @@ impl LeakReport {
             "leaked": open_ms.len() as u64 + self.unsettled,
             "settled": open_ms.len(),
             "open_ms": open_ms,
+            "close_errors": self.close_errors,
             "unsettled": self.unsettled,
             "waited_ms": self.waited_ms,
         })
@@ -80,8 +84,28 @@ impl LeakReport {
 /// Handshakes in flight at once: the runtime allows 6 open connections.
 pub const HANDSHAKE_CONCURRENCY: usize = 5;
 
+/// Connections free for the next dial, out of `limit`, while `open_leaks`
+/// leaked sockets are still closing: each holds a slot until its close
+/// completes (ADR-0020).
+#[must_use]
+pub fn slots(limit: usize, open_leaks: usize) -> usize {
+    limit.saturating_sub(open_leaks)
+}
+
+/// How long the run waits for a slot when leaked sockets hold them all,
+/// before leaving the rest for the next run (ADR-0020). Production showed a
+/// leaked connection open about 19.5 s from its connect call, so a slot
+/// comes back about 10 s after its leak is known.
+pub const SLOT_WAIT_MS: u64 = 15_000;
+
 /// One handshake, connect to last byte.
 pub const HANDSHAKE_TIMEOUT_MS: u64 = 8_000;
+
+/// How long closing a socket may take before it counts as leaked. The
+/// runtime closes a socket only once its connection attempt has settled
+/// (ADR-0019), so closing one whose connect is still pending, to an address
+/// that drops it, waits for that.
+pub const CLOSE_TIMEOUT_MS: u64 = 1_000;
 
 /// Most cache pings per run.
 pub const PINGS_PER_RUN: usize = 2;
@@ -542,6 +566,7 @@ mod tests {
     fn a_leak_report_sorts_open_times_and_counts_both_outcomes() {
         let report = LeakReport {
             open_ms: vec![21_400, 1_250, 9_800],
+            close_errors: 1,
             unsettled: 2,
             waited_ms: 30_000,
         };
@@ -552,6 +577,7 @@ mod tests {
                 "leaked": 5,
                 "settled": 3,
                 "open_ms": [1_250, 9_800, 21_400],
+                "close_errors": 1,
                 "unsettled": 2,
                 "waited_ms": 30_000,
             })
@@ -562,6 +588,7 @@ mod tests {
     fn a_leak_report_with_nothing_settled_still_names_what_it_waited_for() {
         let report = LeakReport {
             open_ms: vec![],
+            close_errors: 0,
             unsettled: 1,
             waited_ms: LEAK_WAIT_MS,
         };
@@ -570,6 +597,30 @@ mod tests {
         assert_eq!(line["settled"], 0);
         assert_eq!(line["open_ms"], serde_json::json!([]));
         assert_eq!(line["waited_ms"], LEAK_WAIT_MS);
+    }
+
+    #[test]
+    fn slots_shrink_with_each_leaked_socket_still_open() {
+        assert_eq!(slots(HANDSHAKE_CONCURRENCY, 0), 5);
+        assert_eq!(slots(HANDSHAKE_CONCURRENCY, 2), 3);
+        assert_eq!(slots(HANDSHAKE_CONCURRENCY, 5), 0);
+        assert_eq!(slots(HANDSHAKE_CONCURRENCY, 9), 0);
+        // A cache ping may use the sixth connection.
+        assert_eq!(slots(HANDSHAKE_CONCURRENCY + 1, 5), 1);
+    }
+
+    #[test]
+    fn the_slot_wait_outlasts_the_connect_timeout_measured_in_production() {
+        // On 2026-10-25 every leaked socket's connection stayed open about
+        // 19.5 s from its connect call (ADR-0020). A leak is known only
+        // after the exchange's deadline and the close timeout, so waiting
+        // SLOT_WAIT_MS from then covers the rest, with a margin.
+        const MEASURED_CONNECT_TIMEOUT_MS: u64 = 19_500;
+        let leak_known_at = HANDSHAKE_TIMEOUT_MS.min(PING_TIMEOUT_MS) + CLOSE_TIMEOUT_MS;
+        assert!(leak_known_at + SLOT_WAIT_MS >= MEASURED_CONNECT_TIMEOUT_MS + 2_000);
+        // A wait never costs more than a run can spare: 15 minutes of wall
+        // time, and no CPU while waiting.
+        const { assert!(SLOT_WAIT_MS <= 30_000) };
     }
 
     #[test]

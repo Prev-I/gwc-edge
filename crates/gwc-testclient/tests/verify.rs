@@ -232,6 +232,10 @@ fn stats_report_the_last_run_and_healthz_the_test_seam() {
     assert_eq!(run["verification_failed"], false);
     let subrequests = run["subrequests"].as_u64().unwrap();
     assert!((1..=45).contains(&subrequests), "{subrequests}");
+    // Loopback connects open at once, so no close can leak and no wave
+    // waits for a slot (ADR-0019, ADR-0020).
+    assert_eq!(run["leaked_sockets"], 0);
+    assert_eq!(run["slot_wait_ms"], 0);
     let health: serde_json::Value = serde_json::from_str(&c.get("/healthz").body).unwrap();
     assert_eq!(health["test_dial"], true);
 }

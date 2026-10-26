@@ -125,9 +125,11 @@ pub struct CronRun {
     /// Hubs picked but not dialled: the subrequest budget, or the connection
     /// slots, ran out.
     pub skipped_budget: u64,
-    /// Sockets whose close timed out: they may still hold connection slots,
-    /// so the run dials fewer at a time after each.
+    /// Sockets whose close timed out: each holds a connection slot until its
+    /// close succeeds, so the run dials fewer at a time meanwhile.
     pub leaked_sockets: u64,
+    /// Time spent waiting for a leaked socket's slot to come back (ADR-0020).
+    pub slot_wait_ms: u64,
     /// The verification's D1 work failed (logged as `d1_error`); its results
     /// were not stored, though its `cron_hub` lines were logged.
     pub verification_failed: bool,

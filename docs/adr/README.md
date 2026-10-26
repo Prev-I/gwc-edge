@@ -24,3 +24,4 @@ changed by a new record that supersedes the old one, never by editing it.
 | [0017](0017-cache-url-names-and-dns-rebinding.md) | Cache URL names that cannot be public are refused; DNS rebinding toward clients remains |
 | [0018](0018-deploys-require-green-ci.md) | Every deploy, manual ones included, requires green CI on the exact commit (amends 0015) |
 | [0019](0019-sockets-that-cannot-close.md) | A socket whose connect never settles cannot be closed early; leaks are measured, and expected after timeouts (amends 0012) |
+| [0020](0020-leaked-slots-come-back.md) | A leaked socket's slot comes back when its close completes; the run waits up to 15 s for one (amends 0019) |

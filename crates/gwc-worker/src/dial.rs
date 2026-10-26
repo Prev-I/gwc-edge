@@ -16,18 +16,13 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use gwc_core::handshake::{self, Exchange, Parse};
 use gwc_core::ping;
-use gwc_core::verify::{HANDSHAKE_TIMEOUT_MS, PING_BODY_MAX, PING_TIMEOUT_MS};
+use gwc_core::verify::{CLOSE_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, PING_BODY_MAX, PING_TIMEOUT_MS};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use worker::wasm_bindgen_futures::spawn_local;
 use worker::{
     Date, Delay, Fetch, Headers, Method, Request, RequestInit, RequestRedirect, SecureTransport,
     Socket,
 };
-
-/// How long closing a socket may take. The runtime closes a socket only once
-/// its connection attempt has settled (ADR-0019), so closing one whose
-/// connect is still pending, to an address that drops it, waits for that.
-const CLOSE_TIMEOUT_MS: u64 = 1_000;
 
 /// Run `f`, or give up after `ms` milliseconds.
 pub async fn within<T>(ms: u64, f: impl Future<Output = T>) -> Option<T> {
@@ -62,8 +57,27 @@ pub struct Leak(pub Option<PendingClose>);
 pub struct PendingClose {
     /// When the socket's connect was called.
     pub connected_ms: u64,
-    /// When the close completed; `None` while it is pending.
-    pub closed_ms: Rc<Cell<Option<u64>>>,
+    /// How the close ended; `None` while it is pending.
+    pub closed: Rc<Cell<Option<Closed>>>,
+}
+
+/// A leaked socket's close, completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Closed {
+    pub at_ms: u64,
+    /// The close resolved, which it does only once the runtime has released
+    /// the connection. After a failed close the runtime may hold the
+    /// connection until garbage collection, so its slot stays taken
+    /// (ADR-0020).
+    pub ok: bool,
+}
+
+impl PendingClose {
+    /// Whether the socket may still hold a connection slot.
+    #[must_use]
+    pub fn holds_slot(&self) -> bool {
+        !self.closed.get().is_some_and(|c| c.ok)
+    }
 }
 
 /// Connect to `host:port`, send `request`, and read until `done` says the
@@ -100,22 +114,24 @@ async fn talk(
     .await;
     // The slot is free only once the socket is closed; bounded as well, and
     // handed back when it timed out, so the caller can stop counting on it.
-    let mut close = Box::pin(async move {
-        let _ = socket.close().await;
-    });
+    let mut close = Box::pin(async move { socket.close().await.is_ok() });
     let leak = if within(CLOSE_TIMEOUT_MS, &mut close).await.is_some() {
         Leak(None)
     } else {
-        // Finish the close as a task of its own, which notes when it ends.
-        let closed_ms = Rc::new(Cell::new(None));
-        let done = Rc::clone(&closed_ms);
+        // Finish the close as a task of its own, which notes when and how
+        // it ends.
+        let closed = Rc::new(Cell::new(None));
+        let done = Rc::clone(&closed);
         spawn_local(async move {
-            close.await;
-            done.set(Some(Date::now().as_millis()));
+            let ok = close.await;
+            done.set(Some(Closed {
+                at_ms: Date::now().as_millis(),
+                ok,
+            }));
         });
         Leak(Some(PendingClose {
             connected_ms,
-            closed_ms,
+            closed,
         }))
     };
     let result = match outcome {

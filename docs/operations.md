@@ -60,7 +60,9 @@ No line carries the requester's address.
   and `evicted` (`dead` rows removed), `caches_pinged`, `caches_verified`,
   `caches_failed`, `skipped_budget` (picked but not dialled), `leaked_sockets`
   (sockets whose close timed out, usually because their connection never
-  opened; each shrinks the run's concurrency, ADR-0019),
+  opened; each shrinks the run's concurrency until its close succeeds,
+  ADR-0019 and ADR-0020), `slot_wait_ms` (time spent waiting for those
+  slots to come back),
   `verification_failed` (the verification's D1 work failed: see the
   `d1_error` line; nothing it decided was stored), `subrequests`
   (counted against the run's ceiling of 45), `test_dial`, `ms`,
@@ -78,7 +80,8 @@ No line carries the requester's address.
   with leaked sockets (ADR-0019): `leaked`, `settled`, `open_ms` (for each
   close that completed, how long its connection stayed open, from the
   connect call, sorted; never below about 9,000, the handshake deadline
-  plus the close timeout), `unsettled` (still open when the wait ended),
+  plus the close timeout), `close_errors` (closes that failed: their slots
+  stayed taken, ADR-0020), `unsettled` (still open when the wait ended),
   `waited_ms` (about 30,000 at most).
 - `{"kind":"cron_trace",…}`: only with `GWC_TRACE=1`: each hub's full reply
   status and headers. Off by default. Not written for a hub whose `ip` is
@@ -149,14 +152,17 @@ two failures delete the cache from the client.
 counts against a ceiling of 45 of the 50 the Free plan allows.
 - Symptom: `skipped_budget` above 0 in the `cron` line; new hubs listed later
   than 10–20 minutes after their first update. `skipped_budget` also counts
-  hubs and pings left out because sockets leaked (`leaked_sockets` above 0):
-  closes that timed out may hold connection slots. Hubs skipped that way
-  still count in `subrequests`, which is charged before dialling.
+  hubs and pings left out because leaked sockets held every connection slot
+  for longer than the run waits for one (`SLOT_WAIT_MS`, 15 s; ADR-0020).
+  Hubs skipped that way still count in `subrequests`, which is charged
+  before dialling.
   - A leak follows a handshake or ping whose connection never opened. The
     runtime cannot close such a socket until the attempt fails (ADR-0019).
   - Leaks up to the run's `timeout` results plus its `caches_failed` are
     expected; more is a bug.
-  - The `cron_leaks` line says how long they stayed open.
+  - The `cron_leaks` line says how long they stayed open: about 19,500 ms
+    in production on 2026-10-25. Much longer means the platform's connect
+    timeout changed: `SLOT_WAIT_MS` must follow it (ADR-0020).
 - Effect: the hubs left over wait for the next run (10 minutes).
 - Fix: compare `subrequests` with the 50 limit; the queue's reserved shares
   (`gwc_core::verify::Class::reserved`) and `HANDSHAKES_PER_RUN` set the load.
