@@ -22,11 +22,13 @@ pub enum Via {
 }
 
 /// The query a ping sends, as caches ping each other: `client=TEST` and the
-/// cache's name as the version (Shareaza wiki, "Pinging Caches").
+/// cache's name as the version (Shareaza wiki, "Pinging Caches"). It carries
+/// a urlfile get, as Shareaza's own G2 requests do, because some caches
+/// answer a ping without a get in GWC1 form (ADR-0023).
 #[must_use]
 pub fn query() -> String {
     let name: String = form_urlencoded::byte_serialize(crate::product_id().as_bytes()).collect();
-    format!("ping=1&net=gnutella2&client=TEST&version={name}")
+    format!("ping=1&get=1&urlfile=1&net=gnutella2&client=TEST&version={name}")
 }
 
 /// How to ping the cache at `url`, a URL normalised by `cache_url`.
@@ -371,8 +373,48 @@ mod tests {
                 query()
             ))
         );
-        assert!(query().starts_with("ping=1&net=gnutella2&client=TEST&version=gwc-edge"));
+        assert!(
+            query()
+                .starts_with("ping=1&get=1&urlfile=1&net=gnutella2&client=TEST&version=gwc-edge")
+        );
         assert!(!query().contains(' '));
+    }
+
+    #[test]
+    fn the_ping_is_a_g2_urlfile_get() {
+        // Cachechu answers a request with neither `get` nor `update` in GWC1
+        // form, `PONG <name>`, which is no pong here (ADR-0023). As this
+        // cache reads it, the ping is a G2 urlfile query with a ping.
+        let q = query();
+        assert!(q.split('&').any(|p| p == "get=1"), "{q}");
+        assert!(!q.contains("gwcs"), "Cachechu reads `gwcs` as GWC1: {q}");
+        let parsed = crate::query::parse(&q).expect("the ping parses");
+        assert!(parsed.ping && parsed.urlfile && !parsed.hostfile, "{q}");
+        assert_eq!(parsed.net, crate::query::Net::Gnutella2);
+        assert_eq!(
+            crate::policy::RateKind::of(&parsed),
+            Some(crate::policy::RateKind::Urlfile)
+        );
+    }
+
+    #[test]
+    fn gwc2_replies_to_the_get_are_judged_at_their_pong() {
+        // What Cachechu 1.6 (`index.php:206-213`, `:413-457`) and Skulls
+        // 0.3.6 (`skulls.php:474-497`, then `Get()`) send for the ping.
+        let cachechu = format!(
+            "{OK}I|pong|Cachechu 1.6|gnutella2\nI|networks|gnutella2\n\
+             H|4.3.2.1:6346|60\nU|http://gwc.example.net/|60\nI|access|period|1800\n"
+        );
+        assert_eq!(early(&cachechu), Some(pong_named("Cachechu 1.6")));
+        let skulls = format!(
+            "{OK}I|pong|Skulls 0.3.6|gnutella2-mute\r\nH|4.3.2.1:6346|60\r\n\
+             U|http://gwc.example.net/|60\r\n"
+        );
+        assert_eq!(early(&skulls), Some(pong_named("Skulls 0.3.6")));
+        // Cachechu joins its networks with `|`: listing `gnutella` first
+        // fails here as it fails in Shareaza (`shareaza_model`).
+        let g1_first = format!("{OK}I|pong|Cachechu 1.6|gnutella|gnutella2\n");
+        assert_eq!(at_close(&g1_first), None);
     }
 
     #[test]
