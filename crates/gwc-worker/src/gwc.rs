@@ -375,9 +375,9 @@ async fn store_cache(
     now: u64,
     probe: &mut Probe,
 ) -> &'static str {
-    let Ok(same_host) = probe
+    let Ok(stored) = probe
         .run("read_caches_for_host", || {
-            store::read_caches_for_host(db, &url.host)
+            store::read_caches_for_host(db, &url.host, &url.url)
         })
         .await
     else {
@@ -389,7 +389,7 @@ async fn store_cache(
     else {
         return "error";
     };
-    let plan = update::plan_cache(url, &same_host, caches);
+    let plan = update::plan_cache(url, &stored.same_host, stored.died, caches, now);
     if plan == CachePlan::Insert
         && probe
             .run("insert_cache", || {

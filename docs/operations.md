@@ -42,7 +42,7 @@ In the dashboard: Workers & Pages → gwc-edge → Observability → Events. Fil
 | `d1_ms` | Time spent waiting on D1. |
 | `cf_colo` | Cloudflare data centre. |
 | `snapshot` | For gets: where the hostfile came from (`memo`, `stored`, `live`, `stale`, `fallback`). |
-| `update` | For updates: what each part did, as labels, e.g. `ip:inserted url:domain_full`. `ip:` is `inserted` (stored `unverified`), `refreshed`, `demoted` (new port: back to `unverified`), `requeued` (an `unverified` hub queued again for the cron), `reregistered` (a `dead` hub queued for a new check after its backoff; still `dead`), `backoff` (a `dead` hub within its backoff: nothing written), `queued` (a `dead` hub already waiting for a check), `coalesced`, `full`, `error`, or a decline (`source_mismatch`, `not_public`, `bad_port`, `malformed`, `not_g2`); `url:` is `inserted`, `known`, `full`, `domain_full`, `error`, or a decline (`https`, `invalid`, `self`, `not_g2`). No address or URL. |
+| `update` | For updates: what each part did, as labels, e.g. `ip:inserted url:domain_full`. `ip:` is `inserted` (stored `unverified`), `refreshed`, `demoted` (new port: back to `unverified`), `requeued` (an `unverified` hub queued again for the cron), `reregistered` (a `dead` hub queued for a new check after its backoff; still `dead`), `backoff` (a `dead` hub within its backoff: nothing written), `queued` (a `dead` hub already waiting for a check), `coalesced`, `full`, `error`, or a decline (`source_mismatch`, `not_public`, `bad_port`, `malformed`, `not_g2`); `url:` is `inserted`, `known`, `full`, `domain_full`, `dead` (the cron deleted it after failed pings in the last 48 h, ADR-0022), `error`, or a decline (`https`, `invalid`, `self`, `not_g2`). No address or URL. |
 
 No line carries the requester's address.
 
@@ -75,7 +75,10 @@ No line carries the requester's address.
   an `X-Try-Hubs` candidate, a seed); for a self-registration that never
   passed a check it is `null`, since that address is only a requester's.
 - `{"kind":"cron_cache",…}`: one per cache pinged: `url`, `result`
-  (`verified`, `failed`, `deleted`).
+  (`verified`, `failed`, `deleted`). A `deleted` URL is recorded in
+  `dead_caches`, and its submissions and seeds are declined for 48 hours
+  (`url:dead`, ADR-0022). To lift that early:
+  `DELETE FROM dead_caches WHERE url = '…'` (matched case-insensitively).
 - `{"kind":"cron_leaks",…}`: after the `cron` line of a run that completes
   with leaked sockets (ADR-0019): `leaked`, `settled`, `open_ms` (for each
   close that completed, how long its connection stayed open, from the
@@ -209,6 +212,8 @@ would cost the cache its place in their lists (ADR-0002).
   written, so the next runs dial the same hubs again (every 10 minutes) until
   it is fixed. Snapshots and `/stats` still update.
 - Check: the `d1_error` text; the usual cause is the D1 quota (see above).
+  `no such table: dead_caches` means the migrations were not applied:
+  `scripts/deploy.sh` applies them before it deploys.
 
 **`TEST_DIAL` in production.** `/healthz` shows `test_dial: true` and every
 `cron_hub` line says `blocked` or names a loopback failure; nothing new is

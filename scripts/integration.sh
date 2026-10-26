@@ -192,6 +192,21 @@ grep -q '"verification_failed":true' "$log" && fail "the cron's verification fai
 # A fresh isolate, so the tests read the stored snapshot rather than the copy
 # the live fallback left in memory.
 stop_worker
+# Seeded only now, so the first run above pinged the caches the read-path
+# tests count: a cache that failed twice and is due again. Its next (blocked)
+# ping deletes it, and the cron records it in dead_caches (ADR-0022,
+# tests/verify.rs). Counted as an insert would count it. tests/write_path.rs
+# counts stored caches against a baseline taken after verify.rs has consumed
+# it, so run the binaries together.
+wrangler d1 execute DB --local --persist-to "$state" --command "
+  INSERT INTO caches (url, host, status, first_seen, last_checked, failures) VALUES
+    ('http://gone.example.net/Gwc/', 'gone.example.net', 'failed', $((now - 9000)), $((now - 7200)), 2);
+  UPDATE counts SET n = n + 1 WHERE k = 'caches';
+  -- Records the cron's expiry must delete (past 48 h) and keep (an hour left).
+  INSERT INTO dead_caches (url, died) VALUES
+    ('http://expired.example.net/', $((now - 172800 - 60))),
+    ('http://fresh.example.net/', $((now - 172800 + 3600)));
+" >/dev/null
 start_worker
 
 # The main Worker's restart rebuilt the shared build directory; make sure the
@@ -209,7 +224,9 @@ GWC_DEGRADED_URL="$degraded_base" GWC_LOG_FILE="$log" GWC_DEGRADED_LOG_FILE="$de
 # nearly full: 499 live hubs, and 2 caches on the host the fake cache offers
 # (fake_peer, base + 8, offers 2 hubs and 2 caches there, plus entries to
 # refuse). The caps in the SQL let exactly one of each in: the freshest hub,
-# the first cache.
+# and the first cache the cron has not lately deleted. The first one offered
+# is recorded in dead_caches, in another case (ADR-0022), so the second goes
+# in.
 seed_state="$(mktemp -d)"
 seed_sql="$seed_state/seed.sql"
 wrangler d1 migrations apply DB --local --persist-to "$seed_state" >/dev/null
@@ -217,6 +234,7 @@ wrangler d1 execute DB --local --persist-to "$seed_state" --command "
   INSERT INTO caches (url, host, status, first_seen) VALUES
     ('http://seeded.example.net/a/', 'seeded.example.net', 'pending', 1),
     ('http://seeded.example.net/b/', 'seeded.example.net', 'pending', 1);
+  INSERT INTO dead_caches (url, died) VALUES ('HTTP://Seeded.Example.net/gwc/', $now);
   WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 498)
   INSERT INTO hubs (ip, port, status, source, first_seen, last_seen)
     SELECT '5.0.' || (i / 250) || '.' || (i % 250 + 1), 6346, 'verified', 'update', 1, 1 FROM n;" >/dev/null
@@ -231,7 +249,7 @@ seeded="$(wrangler d1 execute DB --local --persist-to "$seed_state" --json --com
          (SELECT group_concat(k || '=' || n, ' ') FROM (SELECT * FROM counts ORDER BY k)) AS counts")"
 for want in \
   '"seeded_hubs": "4.3.1.1:6346:unverified"' \
-  '"seeded_caches": "http://seeded.example.net/gwc/"' \
+  '"seeded_caches": "http://seeded.example.net/other/"' \
   '"counts": "caches=3 hubs_live=500 hubs_unverified=0"'; do
   grep -qF "$want" <<<"$seeded" || fail "seed: expected $want in $seeded"
 done

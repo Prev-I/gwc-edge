@@ -198,6 +198,19 @@ fn may_be_public(labels: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn migration_url_checks_match_max_len() {
+        // A URL core accepts must never fail a CHECK on insert: `caches` and
+        // `dead_caches` (ADR-0022) alike.
+        let check = format!("CHECK (length(url) BETWEEN 12 AND {MAX_LEN})");
+        for sql in [
+            include_str!("../../../migrations/0001_initial.sql"),
+            include_str!("../../../migrations/0002_dead_caches.sql"),
+        ] {
+            assert!(sql.contains(&check), "{check}");
+        }
+    }
+
     fn ok(raw: &str) -> String {
         normalize(raw)
             .unwrap_or_else(|e| panic!("{raw:?}: {e:?}"))

@@ -14,6 +14,7 @@
 //! | redirect.example.net | a 302 to dkac | `failed`: redirects are not followed |
 //! | linger.example.net:6349, lingerfetch.example.net | a pong, then the connection held open | `verified`, without waiting for the close |
 //! | halfpong.example.net:6350 | half a pong line, then the connection held open | `failed` |
+//! | gone.example.net (seeded `failed` twice) | blocked | deleted, and recorded in `dead_caches` |
 //!
 //! Every other target is blocked, which counts as a failed check. Runs after
 //! the read-path tests and before the write-path ones (name order).
@@ -174,6 +175,45 @@ fn a_cache_that_keeps_its_connection_open_is_judged_by_its_reply() {
     assert!(listed(&urls, "u|", socket), "{}", urls.body);
     assert!(listed(&urls, "u|", fetched), "{}", urls.body);
     assert!(!listed(&urls, "u|", half));
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn a_cache_deleted_after_failed_pings_is_declined_when_submitted_again() {
+    // ADR-0022. The seed has failed twice; its third failed ping deletes it
+    // and records it, in the same batch. A resubmission is then answered OK
+    // and not stored, matched case-insensitively as `plan_cache` matches.
+    let (c, log) = (client(), log_file());
+    let gone = "http://gone.example.net/Gwc/";
+    let deleted = |from| {
+        json_since(&log, from)
+            .into_iter()
+            .any(|v| v["kind"] == "cron_cache" && v["url"] == gone && v["result"] == "deleted")
+    };
+    // Two pings per run, and pending submissions come first.
+    for _ in 0..6 {
+        if deleted(0) {
+            break;
+        }
+        cron(&c, &log);
+    }
+    assert!(deleted(0), "the seeded cache was never deleted");
+
+    let from = len(&log);
+    ok_reply(&c.submit("http://gone.example.net/gwc/"));
+    let line = settle(&log, from, 1, is_request_line).remove(0);
+    assert_eq!(line["update"], "url:dead", "{line}");
+    assert!(!listed(&c.urlfile(), "u|", "http://gone.example.net/gwc/"));
+
+    // The cron recorded the URL as it was stored, and its expiry deleted only
+    // the record past DEAD_TTL (both seeded by scripts/integration.sh).
+    let state = std::env::var("GWC_STATE_DIR").expect("GWC_STATE_DIR");
+    let rows = gwc_testclient::d1::query(&state, "SELECT url FROM dead_caches ORDER BY url");
+    let urls: Vec<&str> = rows[0].iter().map(|r| r["url"].as_str().unwrap()).collect();
+    assert_eq!(
+        urls,
+        ["http://fresh.example.net/", "http://gone.example.net/Gwc/"]
+    );
 }
 
 #[test]

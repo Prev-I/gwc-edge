@@ -493,7 +493,8 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
   line is never taken for one. The work is linear in the reply's length, so
   a peer trickling its reply costs the cron little.
 - **Result:** a pong makes the cache `verified` and served. A failure makes it
-  `failed` (not served, pinged again after an hour); three in a row delete it.
+  `failed` (not served, pinged again after an hour); three in a row delete it,
+  and the URL is then declined for 48 hours (ADR-0022).
   A verified cache is pinged again every 6 hours. At most 2 pings a run.
 
 ## What gwc-edge stores
@@ -504,7 +505,7 @@ by part (`gwc_core::update`, ADR-0010):
 | Part | Stored when | As | Never stored |
 |---|---|---|---|
 | `ip=` | Gnutella2, a public IPv4 with port 1024..65535, **and the request comes from that address** (`CF-Connecting-IP`) | an `unverified` hub, source `update`, listed after the cron's first successful handshake (ADR-0011) | from any other address: not even as `unverified`; private, reserved or CGNAT addresses; low ports; G1 |
-| `url=` | Gnutella2, a valid `http://` URL (see "Cache URLs" above), not this cache, fewer than 3 already for its host, fewer than 50 in all | a `pending` cache, not served until the cron has pinged it | `https://`, this cache's own URL, invalid URLs, G1 |
+| `url=` | Gnutella2, a valid `http://` URL (see "Cache URLs" above), not this cache, fewer than 3 already for its host, fewer than 50 in all | a `pending` cache, not served until the cron has pinged it | `https://`, this cache's own URL, invalid URLs, G1, a URL the cron deleted after failed pings in the last 48 hours (ADR-0022) |
 
 - Hubs enter `hubs` from a source other than their own address in only two
   ways, both `unverified` and not served until a handshake succeeds:

@@ -440,20 +440,44 @@ pub async fn read_counter(db: &D1Database, k: &str) -> Result<u64> {
     Ok(row.and_then(|r| int(r.n)).unwrap_or(0))
 }
 
-/// The cache URLs stored for a host, for `update::plan_cache`. Reads at most
-/// 3 rows through the `caches_host` index.
-pub async fn read_caches_for_host(db: &D1Database, host: &str) -> Result<Vec<String>> {
+/// What a URL submission is planned against (`update::plan_cache`).
+#[derive(Debug, Default)]
+pub struct HostCaches {
+    /// The cache URLs stored for the submitted URL's host.
+    pub same_host: Vec<String>,
+    /// When the cron deleted the submitted URL, if it is recorded in
+    /// `dead_caches` (ADR-0022); `plan_cache` applies `DEAD_TTL`.
+    pub died: Option<u64>,
+}
+
+/// The cache URLs stored for `host`, and the `dead_caches` record for `url`,
+/// in one statement. Reads at most 4 rows: 3 through the `caches_host`
+/// index, 1 by the `dead_caches` primary key, which is `COLLATE NOCASE` like
+/// `plan_cache`'s comparison.
+pub async fn read_caches_for_host(db: &D1Database, host: &str, url: &str) -> Result<HostCaches> {
     #[derive(Deserialize)]
     struct R {
         url: String,
+        died: Option<f64>,
     }
-    rows(
-        db.prepare("SELECT url FROM caches WHERE host = ?1")
-            .bind(&[host.into()])?,
+    let found: Vec<R> = rows(
+        db.prepare(
+            "SELECT url, NULL AS died FROM caches WHERE host = ?1 \
+             UNION ALL SELECT url, died FROM dead_caches WHERE url = ?2",
+        )
+        .bind(&[host.into(), url.into()])?,
         "read_caches_for_host",
-        |r: R| Some(r.url),
+        Some,
     )
-    .await
+    .await?;
+    let mut out = HostCaches::default();
+    for r in found {
+        match r.died {
+            None => out.same_host.push(r.url),
+            Some(d) => out.died = int(d),
+        }
+    }
+    Ok(out)
 }
 
 fn opt_num(n: Option<u64>) -> JsValue {
@@ -802,9 +826,47 @@ pub struct Removed {
 }
 
 /// Most statements [`apply_cron`] issues: hub verdicts, candidate deletes,
-/// candidate inserts, the purge, the eviction, and one per pinged cache.
+/// candidate inserts, the purge, the eviction, one per pinged cache, the
+/// `dead_caches` record and its expiry (ADR-0022).
 #[allow(clippy::cast_possible_truncation)] // a small constant
-pub const APPLY_STATEMENTS: u32 = 5 + gwc_core::verify::PINGS_PER_RUN as u32;
+pub const APPLY_STATEMENTS: u32 = 7 + gwc_core::verify::PINGS_PER_RUN as u32;
+
+/// The `dead_caches` statements of a results batch (ADR-0022): the record of
+/// the caches this run deleted after failed pings, in the same batch as
+/// their deletes, and the expiry of old records. `caches.url` is
+/// case-sensitive and `dead_caches.url` is not, so two deleted URLs may be
+/// one record: the insert upserts rather than failing the batch. The expiry
+/// is housekeeping only: `plan_cache` and the seed already ignore an expired
+/// record. Writes 1 row per record and per expired row; the expiry scans the
+/// table (at most 576 rows).
+fn dead_cache_statements(
+    db: &D1Database,
+    now: u64,
+    w: &CronWrites,
+) -> Result<Vec<D1PreparedStatement>> {
+    use gwc_core::verify::{CacheAction, dead_cache_floor};
+    let dead: Vec<&str> = w
+        .caches
+        .iter()
+        .filter(|c| c.action == CacheAction::Delete)
+        .map(|c| c.url.as_str())
+        .collect();
+    let mut stmts = Vec::new();
+    if !dead.is_empty() {
+        stmts.push(
+            db.prepare(
+                "INSERT INTO dead_caches (url, died) SELECT value, ?2 FROM json_each(?1) WHERE true \
+                 ON CONFLICT (url) DO UPDATE SET died = excluded.died",
+            )
+            .bind(&[JsValue::from(serde_json::json!(dead).to_string()), num(now)])?,
+        );
+    }
+    stmts.push(
+        db.prepare("DELETE FROM dead_caches WHERE died < ?1")
+            .bind(&[num(dead_cache_floor(now))])?,
+    );
+    Ok(stmts)
+}
 
 /// Apply a run's results in one batch (ADR-0012). Each guard is evaluated
 /// when the batch runs, not when the hub was read, so a request racing the
@@ -814,8 +876,10 @@ pub const APPLY_STATEMENTS: u32 = 5 + gwc_core::verify::PINGS_PER_RUN as u32;
 ///   candidate (one that registered itself meanwhile stays).
 ///
 /// Writes: 1 row per verdict, deleted candidate, inserted candidate, purged
-/// or evicted row and pinged cache. Reads: the verdict and delete statements
-/// look rows up by primary key; the purge and the eviction each scan `hubs`.
+/// or evicted row and pinged cache, and per `dead_caches` record written or
+/// expired. Reads: the verdict and delete statements look rows up by primary
+/// key; the purge and the eviction each scan `hubs`, and the expiry scans
+/// `dead_caches` ([`dead_cache_statements`]).
 pub async fn apply_cron(db: &D1Database, now: u64, w: &CronWrites) -> Result<Removed> {
     use gwc_core::verify::{CacheAction, DEAD_MAX, DEAD_TTL, PURGE_BATCH};
     let json = |v: &serde_json::Value| JsValue::from(v.to_string());
@@ -889,6 +953,7 @@ pub async fn apply_cron(db: &D1Database, now: u64, w: &CronWrites) -> Result<Rem
             CacheAction::Delete => db.prepare("DELETE FROM caches WHERE url = ?1").bind(&[url])?,
         });
     }
+    stmts.extend(dead_cache_statements(db, now, w)?);
     let results = db.batch(stmts).await?;
     let changes = |i: usize| {
         results

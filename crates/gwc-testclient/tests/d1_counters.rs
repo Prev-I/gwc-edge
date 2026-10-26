@@ -3,46 +3,10 @@
 //! through `wrangler d1 execute --local`, which executes the statements on one
 //! connection as a D1 batch does. Run by `scripts/integration.sh`.
 
-use std::process::Command;
-
 use gwc_core::update::{COUNT_INSERTED_CACHE, COUNT_INSERTED_HUB, UNCOUNT_REQUEUED_CANDIDATE};
 use gwc_testclient::Client;
 
-/// `wrangler`, run from the repository root: it finds `wrangler.jsonc` there,
-/// and keeps its cache in the git-ignored `.wrangler/`.
-fn wrangler() -> Command {
-    let mut c = Command::new("wrangler");
-    c.current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-    c
-}
-
-/// Run SQL on the local D1 in `dir`; the rows of each statement's result.
-fn d1(dir: &str, sql: &str) -> Vec<Vec<serde_json::Value>> {
-    let out = wrangler()
-        .args([
-            "d1",
-            "execute",
-            "DB",
-            "--local",
-            "--persist-to",
-            dir,
-            "--json",
-            "--command",
-            sql,
-        ])
-        .output()
-        .expect("wrangler on PATH (run scripts/integration.sh)");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let results: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
-    results
-        .into_iter()
-        .map(|r| r["results"].as_array().cloned().unwrap_or_default())
-        .collect()
-}
+use gwc_testclient::d1::{query as d1, wrangler};
 
 fn number(dir: &str, sql: &str) -> u64 {
     d1(dir, sql)[0][0]["n"].as_u64().unwrap()

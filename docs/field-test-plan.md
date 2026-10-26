@@ -70,7 +70,10 @@ The script:
 - **Keeps what this cache's own rules accept:**
   - public IPv4 hubs on port 1024 or above, at most 100;
   - canonical `http://` caches, at most 3 per host, never this cache; `dkac`
-    itself is one of them.
+    itself is one of them;
+  - no cache the cron deleted after failed pings in the 48 hours before
+    `fetch` ran (ADR-0022). The bound is fixed when `fetch` writes the file,
+    so a file applied later errs towards skipping.
 - **Stores them for verification only.** Hubs go in as `unverified` (source
   `seed`) and caches as `pending`. Nothing is served before the cron has
   checked it.
