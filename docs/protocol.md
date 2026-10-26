@@ -464,8 +464,11 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
   fails its first check is `dead`; a failed candidate is deleted.
 
 **Cache verification** (`ping`, the same cron, ADR-0012):
-- **Request:** `GET <url>?ping=1&net=gnutella2&client=TEST&version=gwc-edge+<version>`,
-  `User-Agent: gwc-edge <version>`. A DNS name on port 80 is fetched; an
+- **Request:** `GET <url>?ping=1&get=1&urlfile=1&net=gnutella2&client=TEST&version=gwc-edge+<version>`,
+  `User-Agent: gwc-edge <version>`. The urlfile get is there because some
+  caches answer a ping without `get` or `update` in GWC1 form, `PONG <name>`,
+  which is no pong here; with it, the request has the shape of Shareaza's own
+  G2 urlfile query (ADR-0023). A DNS name on port 80 is fetched; an
   IP-literal host or another port gets plain HTTP/1.0 over a TCP socket,
   because `fetch()` cannot reach IP addresses and does not reliably honour
   other ports. Neither follows redirects: a cache that only answers through

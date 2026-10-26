@@ -9,7 +9,7 @@
 //! | base | a Shareaza hub with room: `200 OK`, G2 (verified) |
 //! | base + 1 | a full hub: `503 Maximum connections reached` with `X-Try-Hubs` (`alive_full`) |
 //! | base + 2 | a leaf: `503 Shielded leaf node` (dead) |
-//! | base + 3 | a GWebCache: `i|pong|fake-cache 1.0|gnutella2` over HTTP |
+//! | base + 3 | a GWebCache that answers like Cachechu: `i|pong|fake-cache 1.0|gnutella2` over HTTP to a request with `get` or `update`, a GWC1 `PONG fake-cache 1.0` to a bare ping |
 //! | base + 5 | a hub that never answers (the cron times out) |
 //! | base + 6 | a hub that closes in the middle of its header block |
 //! | base + 7 | an HTTP redirect to a real cache (not followed) |
@@ -40,7 +40,7 @@ fn main() {
         (0, |_| hub_ok()),
         (1, |_| hub_full()),
         (2, |_| leaf()),
-        (3, |_| cache()),
+        (3, cachechu_like),
         (5, |_| stall()),
         (6, |_| cut_short()),
         (7, |_| redirect()),
@@ -162,6 +162,22 @@ fn leaf() -> Vec<u8> {
       User-Agent: Shareaza 2.7.10.6\r\n\
       \r\n"
         .to_vec()
+}
+
+/// Cachechu treats a request with neither `get` nor `update` as GWC1, and
+/// answers its ping with `PONG <name>` (ADR-0023).
+fn cachechu_like(request: &[u8]) -> Vec<u8> {
+    let line = String::from_utf8_lossy(request);
+    let line = line.lines().next().unwrap_or_default();
+    if line.contains("get=1") || line.contains("update=1") {
+        cache()
+    } else {
+        b"HTTP/1.0 200 OK\r\n\
+          Content-Type: text/plain\r\n\
+          \r\n\
+          PONG fake-cache 1.0\r\n"
+            .to_vec()
+    }
 }
 
 fn cache() -> Vec<u8> {
