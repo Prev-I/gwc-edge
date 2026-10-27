@@ -25,6 +25,10 @@ cache answers, it serves `gnutella2`, and the cron can reach it within budget.
 That makes it the natural moment to tell the cache about this one.
 
 ### This cache cannot verify Cachechu today
+*Resolved by ADR-0023 (0.4.0): the ping now carries a urlfile get, so
+Cachechu installs that list `gnutella2` first, the default, are verified.
+This subsection records the state when the record was proposed.*
+
 The cron's ping is a bare `ping=1&net=gnutella2&client=TEST&version=…`
 (`ping::query`).
 - Cachechu treats a request with neither `get` nor `update` as GWC1, and
@@ -112,8 +116,7 @@ record. Until it is made, no Cachechu cache would receive an advertisement.
   caches, so it must first be proven to answer Shareaza correctly.
 
 ## Open before implementation
-- **The Cachechu ping** above: decided first, or this record reaches only
-  Skulls-like caches.
+- **The Cachechu ping** above: decided by ADR-0023.
 - **Does the cron's `fetch()` carry `CF-Connecting-IP`?** The Cloudflare
   headers reference says that, for Worker subrequests to an origin outside
   Cloudflare, "the Worker script controls the client IP headers"
