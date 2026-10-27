@@ -339,3 +339,51 @@ pub mod logs {
         v.get("outcome").is_some()
     }
 }
+
+/// SQL on a local D1 through `wrangler d1 execute --local`, which runs the
+/// statements on one connection as a D1 batch does: for tests that inspect
+/// the database the integration Worker uses (`GWC_STATE_DIR`).
+pub mod d1 {
+    use std::process::Command;
+
+    /// `wrangler`, run from the repository root: it finds `wrangler.jsonc`
+    /// there, and keeps its cache in the git-ignored `.wrangler/`.
+    #[must_use]
+    pub fn wrangler() -> Command {
+        let mut c = Command::new("wrangler");
+        c.current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        c
+    }
+
+    /// Run SQL on the local D1 in `dir`; the rows of each statement's result.
+    ///
+    /// # Panics
+    /// If `wrangler` is missing or the SQL fails.
+    #[allow(clippy::must_use_candidate)] // also run for its writes alone
+    pub fn query(dir: &str, sql: &str) -> Vec<Vec<serde_json::Value>> {
+        let out = wrangler()
+            .args([
+                "d1",
+                "execute",
+                "DB",
+                "--local",
+                "--persist-to",
+                dir,
+                "--json",
+                "--command",
+                sql,
+            ])
+            .output()
+            .expect("wrangler on PATH (run scripts/integration.sh)");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let results: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+        results
+            .into_iter()
+            .map(|r| r["results"].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+}

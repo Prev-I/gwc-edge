@@ -17,6 +17,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use crate::addr::{self, AddrError};
 use crate::cache_url::{self, CacheUrl, UrlError};
 use crate::query::{Net, Query};
+use crate::verify::dead_cache_floor;
 
 /// A hub refreshing sooner than this after its last refresh writes nothing.
 /// Shareaza updates a cache at most hourly, so every real refresh still lands.
@@ -300,6 +301,9 @@ pub enum CachePlan {
     Full,
     /// The host already has [`MAX_PER_DOMAIN`] URLs.
     DomainFull,
+    /// The cron deleted this URL after failed pings less than
+    /// [`DEAD_TTL`](crate::verify::DEAD_TTL) ago (ADR-0022).
+    Dead,
 }
 
 impl CachePlan {
@@ -311,15 +315,27 @@ impl CachePlan {
             CachePlan::Known => "known",
             CachePlan::Full => "full",
             CachePlan::DomainFull => "domain_full",
+            CachePlan::Dead => "dead",
         }
     }
 }
 
-/// Plan a cache claim against the URLs stored for its host and the cache count.
+/// Plan a cache claim against the URLs stored for its host, the time the
+/// cron deleted this URL (`dead_caches.died`, if recorded), and the cache
+/// count. The record blocks for [`DEAD_TTL`](crate::verify::DEAD_TTL),
+/// whether or not the cron has purged it yet (ADR-0022).
 #[must_use]
-pub fn plan_cache(url: &CacheUrl, same_host: &[String], caches: u64) -> CachePlan {
+pub fn plan_cache(
+    url: &CacheUrl,
+    same_host: &[String],
+    died: Option<u64>,
+    caches: u64,
+    now: u64,
+) -> CachePlan {
     if same_host.iter().any(|u| u.eq_ignore_ascii_case(&url.url)) {
         CachePlan::Known
+    } else if died.is_some_and(|d| d >= dead_cache_floor(now)) {
+        CachePlan::Dead
     } else if caches >= MAX_CACHES {
         CachePlan::Full
     } else if same_host.len() >= MAX_PER_DOMAIN {
@@ -334,6 +350,7 @@ mod tests {
     use super::*;
     use crate::cache_url::normalize;
     use crate::query::parse;
+    use crate::verify::DEAD_TTL;
 
     const NOW: u64 = 1_792_744_200;
 
@@ -686,18 +703,54 @@ mod tests {
     #[test]
     fn cache_plans() {
         let u = normalize("http://gwc.example.net/b/").unwrap();
-        assert_eq!(plan_cache(&u, &[], 0), CachePlan::Insert);
+        assert_eq!(plan_cache(&u, &[], None, 0, NOW), CachePlan::Insert);
         assert_eq!(
-            plan_cache(&u, &urls(&["http://gwc.example.net/b/"]), 10),
+            plan_cache(&u, &urls(&["http://gwc.example.net/b/"]), None, 10, NOW),
             CachePlan::Known
         );
-        assert_eq!(plan_cache(&u, &[], MAX_CACHES), CachePlan::Full);
+        assert_eq!(plan_cache(&u, &[], None, MAX_CACHES, NOW), CachePlan::Full);
         let three = urls(&[
             "http://gwc.example.net/a/",
             "http://gwc.example.net/c/",
             "http://gwc.example.net/d/",
         ]);
-        assert_eq!(plan_cache(&u, &three, 10), CachePlan::DomainFull);
-        assert_eq!(plan_cache(&u, &three[..2], 10), CachePlan::Insert);
+        assert_eq!(plan_cache(&u, &three, None, 10, NOW), CachePlan::DomainFull);
+        assert_eq!(
+            plan_cache(&u, &three[..2], None, 10, NOW),
+            CachePlan::Insert
+        );
+    }
+
+    #[test]
+    fn a_cache_the_cron_deleted_is_declined_for_dead_ttl() {
+        // ADR-0022: the record blocks while died >= now - DEAD_TTL, whether
+        // or not the cron has purged it yet.
+        let u = normalize("http://gwc.example.net/b/").unwrap();
+        let plan = |died| plan_cache(&u, &[], Some(died), 10, NOW);
+        assert_eq!(plan(NOW), CachePlan::Dead);
+        assert_eq!(plan(NOW - DEAD_TTL), CachePlan::Dead);
+        assert_eq!(plan(NOW - DEAD_TTL - 1), CachePlan::Insert);
+        assert_eq!(plan(NOW + 5), CachePlan::Dead, "isolate clock skew");
+        assert_eq!(CachePlan::Dead.as_str(), "dead");
+    }
+
+    #[test]
+    fn a_stored_row_wins_over_a_dead_record_and_the_record_over_the_caps() {
+        let u = normalize("http://gwc.example.net/b/").unwrap();
+        // An operator re-inserted the URL without lifting the record.
+        assert_eq!(
+            plan_cache(
+                &u,
+                &urls(&["http://gwc.example.net/b/"]),
+                Some(NOW),
+                10,
+                NOW
+            ),
+            CachePlan::Known
+        );
+        assert_eq!(
+            plan_cache(&u, &[], Some(NOW), MAX_CACHES, NOW),
+            CachePlan::Dead
+        );
     }
 }

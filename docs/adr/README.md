@@ -31,5 +31,5 @@ number either way, and from then on the rule above applies.
 | [0019](0019-sockets-that-cannot-close.md) | A socket whose connect never settles cannot be closed early; leaks are measured, and expected after timeouts (amends 0012) |
 | [0020](0020-leaked-slots-come-back.md) | A leaked socket's slot comes back when its close completes; the run waits up to 15 s for one (amends 0019) |
 | [0021](0021-advertise-to-verified-caches.md) | **Proposed:** the cron advertises this cache to the caches it verifies, once a week each (would amend 0012) |
-| [0022](0022-failed-caches-are-remembered.md) | **Proposed:** a cache deleted after failed pings is remembered for 48 h, and its resubmissions are declined (would amend 0012) |
+| [0022](0022-failed-caches-are-remembered.md) | A cache deleted after failed pings is remembered for 48 h, and its resubmissions and seeds are declined (amends 0012) |
 | [0023](0023-the-cache-ping-carries-a-get.md) | The cache ping carries a urlfile get, so caches that answer a bare ping in GWC1 form can be verified (amends 0012) |

@@ -1,8 +1,9 @@
 //! The cron run (every 10 minutes, ADR-0012):
 //! 1. read the hub and cache queues and the cap counters (one batch);
 //! 2. handshake with up to 16 hubs, 5 at a time, then ping up to 2 caches;
-//! 3. apply every result, store new `X-Try-Hubs` candidates, and purge old
-//!    `dead` rows (one batch);
+//! 3. apply every result, store new `X-Try-Hubs` candidates, purge old
+//!    `dead` rows, record the caches deleted after failed pings in
+//!    `dead_caches` and expire old records (ADR-0022) (one batch);
 //! 4. render the hostfile snapshot and the cron summary every run, and the
 //!    hourly stats once an hour, reconciling the cap counters (one batch),
 //!    after step 3 so the hostfile lists the hubs just verified;
@@ -38,6 +39,19 @@ const STATS_EVERY: u64 = 55 * 60;
 /// for the live snapshot, 1 status count, 1 stats check, 2 for the hourly
 /// totals, at most 3 documents and 3 reconciles) and the 2 Cache API purges.
 const TAIL: u32 = store::APPLY_STATEMENTS + 2 + 1 + 1 + 2 + 3 + 3 + 2;
+
+// A full run fits the ledger: the queue read, every handshake and ping, and
+// the tail. A statement added to the run without room for it would
+// otherwise skip pings silently (`skipped_budget`).
+#[allow(clippy::cast_possible_truncation)] // small constants
+const _: () = assert!(
+    store::QUEUE_STATEMENTS
+        + gwc_core::verify::HANDSHAKES_PER_RUN as u32
+        + gwc_core::verify::PINGS_PER_RUN as u32
+        + TAIL
+        <= gwc_core::verify::SUBREQUEST_CEILING,
+    "a full cron run exceeds the subrequest ceiling"
+);
 
 pub async fn run(env: &Env) -> Result<()> {
     let started_ms = Date::now().as_millis();

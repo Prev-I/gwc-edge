@@ -35,6 +35,15 @@ pub const SERVABLE_FAILURES: u64 = 2;
 /// A `dead` row neither seen nor checked for this long is deleted.
 pub const DEAD_TTL: u64 = 48 * 3600;
 
+/// The oldest `dead_caches.died` that still blocks a cache URL (ADR-0022):
+/// a record blocks while `died >= dead_cache_floor(now)`, and the cron
+/// deletes it once `died` is below. The one bound for the submission path,
+/// the seed and the cron's expiry.
+#[must_use]
+pub fn dead_cache_floor(now: u64) -> u64 {
+    now.saturating_sub(DEAD_TTL)
+}
+
 /// Most `dead` rows kept; beyond it, the longest unchecked go first.
 pub const DEAD_MAX: u64 = 1_000;
 
@@ -348,6 +357,15 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_792_744_200;
+
+    #[test]
+    fn a_dead_cache_record_blocks_from_the_floor_on() {
+        // ADR-0022: a record blocks while died >= floor; the cron deletes it
+        // once died < floor (the boundaries are tested in `update`).
+        let now = 1_800_000_000;
+        assert_eq!(dead_cache_floor(now), now - DEAD_TTL);
+        assert_eq!(dead_cache_floor(DEAD_TTL - 1), 0);
+    }
 
     #[test]
     fn backoff_doubles_from_ten_minutes_to_a_day() {

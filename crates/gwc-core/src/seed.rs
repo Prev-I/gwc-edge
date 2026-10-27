@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use crate::cache_url::{CacheUrl, normalize};
 use crate::update::{MAX_CACHES, MAX_HUBS, MAX_PER_DOMAIN, is_self, reconcile_sql};
+use crate::verify::dead_cache_floor;
 
 /// Most hubs taken from one seeding.
 pub const MAX_SEED_HUBS: usize = 100;
@@ -113,9 +114,12 @@ impl Seed {
                  SELECT '{url}', '{host}', 'pending', {now} \
                  WHERE (SELECT COUNT(*) FROM caches) < {MAX_CACHES} \
                  AND (SELECT COUNT(*) FROM caches WHERE host = '{host}') < {MAX_PER_DOMAIN} \
+                 AND NOT EXISTS (SELECT 1 FROM dead_caches \
+                 WHERE url = '{url}' AND died >= {live}) \
                  ON CONFLICT (url) DO NOTHING;",
                 url = quote(&cache.url),
                 host = quote(&cache.host),
+                live = dead_cache_floor(now),
             );
         }
         for statement in reconcile_sql() {
@@ -134,6 +138,7 @@ fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verify::DEAD_TTL;
 
     const NOW: u64 = 1_792_744_200;
 
@@ -210,6 +215,23 @@ mod tests {
         assert!(lines[2].contains("(SELECT COUNT(*) FROM caches) < 50"));
         assert!(lines[2].contains("WHERE host = 'other.example.net') < 3"));
         assert!(lines[4].starts_with("UPDATE counts SET n = t.c"));
+    }
+
+    #[test]
+    fn a_cache_the_cron_deleted_lately_is_not_seeded() {
+        // ADR-0022: the same block as a submission, read the same way.
+        let sql = read(REPLY).sql(NOW);
+        let guard = format!(
+            "AND NOT EXISTS (SELECT 1 FROM dead_caches \
+             WHERE url = 'http://other.example.net/gwc/' AND died >= {})",
+            NOW - DEAD_TTL
+        );
+        let cache = sql
+            .lines()
+            .find(|l| l.contains("'http://other.example.net/gwc/'"))
+            .expect("the cache is seeded");
+        assert!(cache.contains(&guard), "{cache}");
+        assert!(cache.ends_with("ON CONFLICT (url) DO NOTHING;"), "{cache}");
     }
 
     #[test]

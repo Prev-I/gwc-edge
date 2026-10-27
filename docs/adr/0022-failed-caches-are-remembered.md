@@ -1,6 +1,7 @@
 # ADR-0022: A deleted cache is remembered for 48 hours
 
-**Status:** proposed, 2026-10-26. Would amend ADR-0012 ("Caches").
+**Status:** accepted, 2026-10-26, after the Cachechu ping was fixed
+(ADR-0023). Amends ADR-0012 ("Caches").
 
 ## Context
 - **Three failed pings in a row delete a cache** (`verify::after_ping`,
@@ -41,22 +42,24 @@ Every submission is checked against it (`:1158`).
   seeding. How often submit mode is used is unknown.
 
 So this record is worth its cost only once the cron's known false negatives
-are fixed, and it should be decided after the Cachechu ping.
+are fixed, and it should be decided after the Cachechu ping. ADR-0023 fixed
+that ping; the redirect case remains.
 
-## Decision (proposed)
+## Decision
 - **When the cron deletes a cache after its third failed ping, it records the
-  URL** in a new table:
+  URL** in a new table (`migrations/0002_dead_caches.sql`):
 
   ```sql
   CREATE TABLE dead_caches (
-    url   TEXT    NOT NULL PRIMARY KEY COLLATE NOCASE CHECK (length(url) BETWEEN 12 AND 255),
+    url   TEXT    NOT NULL COLLATE NOCASE PRIMARY KEY CHECK (length(url) BETWEEN 12 AND 255),
     died  INTEGER NOT NULL CHECK (died >= 0)
   ) STRICT, WITHOUT ROWID;
   ```
 
   - The records are written by one `INSERT … SELECT … FROM json_each(?1)
     WHERE true ON CONFLICT (url) DO UPDATE SET died = excluded.died`, in the
-    same results batch as the deletes. That is the pattern of the
+    same results batch as the deletes (`store::dead_cache_statements`), so a
+    delete never happens without its record. That is the pattern of the
     `X-Try-Hubs` candidates insert.
   - The `ON CONFLICT` clause is required. `caches.url` is case-sensitive,
     so `caches` can hold two URLs that differ only in case (seeding
@@ -65,7 +68,8 @@ are fixed, and it should be decided after the Cachechu ping.
     verdicts included, and the same rows head the queue again next run.
   - `COLLATE NOCASE` matches `update::plan_cache`, which compares URLs
     case-insensitively. Without it, a resubmission that differs only in
-    path case would slip past the record.
+    path case would slip past the record. The primary key index takes the
+    column's collation, so the lookup by a bound URL still uses it.
 - **A submission or a seed for a URL in `dead_caches` is declined.**
   - It gets the reply every update gets (`i|update|OK`, decision A in
     `docs/protocol.md`), and the request's log line gets a new plan reason,
@@ -76,15 +80,30 @@ are fixed, and it should be decided after the Cachechu ping.
     a dead URL as `Known` nor counts it towards the 3-per-host cap. It adds
     no D1 statement and reads at most one more row.
   - Seeding (`gwc_core::seed`) generates its own SQL, so each generated
-    `INSERT` gains `AND NOT EXISTS (SELECT 1 FROM dead_caches WHERE url = …)`.
-- **A record expires 48 hours after `died`**, the hubs' `DEAD_TTL`.
-  - Expired records are deleted in `apply_cron`, next to the purge of dead
-    hubs, and the statement counts in `store::APPLY_STATEMENTS`.
+    `INSERT` gains `AND NOT EXISTS (SELECT 1 FROM dead_caches WHERE url = …
+    AND died >= now - DEAD_TTL)`.
+- **A record blocks for 48 hours after `died`**, the hubs' `DEAD_TTL`.
+  - **The rule is applied where the record is read:** `plan_cache` declines
+    while `died >= verify::dead_cache_floor(now)`, that is
+    `now - DEAD_TTL`. The seed guard and the cron's expiry use the same
+    function. A
+    stalled cron therefore cannot stretch a block beyond 48 hours.
+  - Expired records are deleted in `apply_cron`, in the same batch, and both
+    new statements count in `store::APPLY_STATEMENTS`. The delete is
+    housekeeping, not the rule.
   - The table needs no cap. Only the cron deletes caches: at most 2 a run,
     144 runs a day, kept 2 days, so at most 576 rows. Each deletion takes
     3 pings, so the sustained figure is about 192.
 - **Only deletions made by the cron create a record.** An operator removing
-  a row by hand does not, and can lift a record by deleting it.
+  a row by hand does not, and can lift a record by deleting it
+  (`DELETE FROM dead_caches WHERE url = …`). A URL stored in `caches` is
+  `known` even while a record exists, so an operator's re-insert is not
+  reported as `dead`.
+- **The cron's budget is checked at compile time.** With the two new
+  statements, a full run (queue read, 16 handshakes, 2 pings and the tail)
+  needs 44 of the 45 subrequests the `Ledger` allows. A `const` assertion in
+  `cron.rs` fails the build if a later statement would push a full run past
+  the ceiling, instead of silently skipping pings.
 - **Alternative rejected: keep the row in `caches` with a `dead` status.**
   - The `status` `CHECK` admits only `pending`, `verified` and `failed`.
     Changing it means rebuilding a live STRICT table in a frozen-migration
@@ -105,13 +124,18 @@ are fixed, and it should be decided after the Cachechu ping.
   - **Rows written:** one per deletion and one per expiry. The table is
     `WITHOUT ROWID` and has no secondary index.
   - **Statements:** two more in the results batch, for the insert and the
-    expiry.
+    expiry. The submission path keeps one statement: the per-host read gains
+    a `UNION ALL` arm.
   - **Rows read:** the expiry scans the table on every run, since `died` is
     not indexed. That is at most 576 rows a run, about 83,000 a day, and
-    about 28,000 a day at the sustained size. Rows
-    read are not the scarce budget, while an index on `died` would double
-    every write.
-- **Schema:** `dead_caches` in a new migration (ADR-0015), plus its line in
-  `SHA256SUMS`.
-- **On acceptance**, `docs/protocol.md` ("Cache verification", "What
-  gwc-edge stores") and `docs/operations.md` (log reasons) change with it.
+    about 28,000 a day at the sustained size. Rows read are not the scarce
+    budget, while an index on `died` would double every write.
+- **Schema:** `dead_caches` in `migrations/0002_dead_caches.sql`
+  (ADR-0015), plus its line in `SHA256SUMS`. Its name is final once applied
+  remotely: D1 records migrations by file name. A core test checks that its
+  URL bounds match `cache_url::MAX_LEN`.
+- **Deploy order:** `scripts/deploy.sh` applies migrations before it deploys
+  the Worker, and stops if they fail, so the Worker never runs ahead of the
+  table. An older Worker never names the table, so a rollback is safe.
+- `docs/protocol.md` ("Cache verification", "What gwc-edge stores") and
+  `docs/operations.md` (the `dead` log reason) change with it.
