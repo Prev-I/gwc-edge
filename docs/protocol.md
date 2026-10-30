@@ -35,10 +35,15 @@ file.
 - `DiscoveryServices.cpp` was last changed on 2017-03-27, when it was synced to
   upstream SVN r9660. That is the 2.7.10 line, so its parser is the one deployed
   hubs run.
-- The fork differs elsewhere:
-  - It reports vendor `RAZI` (`Shareaza.h:444`), where upstream reports `RAZA`.
+- The oracle differs elsewhere from the SourceForge Shareaza 2.7.10.2, the
+  last release of the original project and the one most hubs run. Both
+  differences come from the ansani/Shareaza line, commit `64541b5d5` ("Soft
+  name change", 2017-10-03). They ship in its releases from 2.7.10.3-beta.2 to
+  2.7.10.6, and so in the Prev-I fork's 2.7.10.6 builds:
+  - It reports vendor `RAZI` (`Shareaza.h:444`), so its G2 gets carry
+    `client=RAZI2.7.10.6`; 2.7.10.2 reports `RAZA`.
   - Its User-Agent is `iShareaza <version>` (`Shareaza.cpp:1109-1111`), where
-    upstream sends `Shareaza <version>`.
+    2.7.10.2 sends `Shareaza <version>`.
   - Nothing here depends on either value.
 
 **Written specifications** (`docs/spec/README.md` has provenance, hashes and
@@ -119,6 +124,10 @@ Things to note:
 - **On G2 the version is glued to the vendor code**, as in
   `client=RAZA2.7.10.6`, with no `version=` (`DS:1423-1424`, `DS:1862-1863`).
   The vendor code is the first four characters.
+- The examples above write `RAZA2.7.10.6`, a combination no shipped build
+  sends: 2.7.10.2 sends `RAZA2.7.10.2`, and the oracle's 2.7.10.6 sends
+  `RAZI2.7.10.6`. Only the shape matters to the cache: the client code feeds
+  nothing but the denylist, the request counters and the log line.
 - `x.leaves` and `x.max` are written with a dot. Other clients use `x_leaves`
   and `x_max`.
 - `ip=` is Shareaza's own idea of its address (`Network.m_pHost`). Behind NAT
