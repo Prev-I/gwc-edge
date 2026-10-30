@@ -9,7 +9,10 @@
 # That catches zone settings that break Shareaza (an HTTPS redirect, a
 # challenge, compression) as well as the cache itself (README, "Zone
 # settings"). Nothing is stored: the update comes from another address, and
-# the submitted URL is the cache's own.
+# the submitted URL is the cache's own. Only the client code is not
+# Shareaza's: `GWCEsmoke` shows up in /stats and the logs as vendor `GWCE`,
+# version `smoke`, so the check's own requests are never mistaken for a real
+# client's.
 #
 # The local run ends with the same --prod checks against the local Worker,
 # reached through curl's --connect-to, so CI exercises them too.
@@ -39,7 +42,7 @@ prod() {
     || { echo "smoke --prod: expected the canonical http:// URL, got $url" >&2; exit 2; }
   local enc
   enc="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$url")"
-  local client="client=RAZA2.7.10.6"
+  local client="client=GWCEsmoke"
   local tail="&getleaves=1&getnetworks=1&getclusters=0&getvendors=1&getuptime=1"
   local shapes=(
     "hostfile|?get=1&hostfile=1&net=gnutella2&ping=1&pv=4&$client$tail"
