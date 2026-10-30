@@ -344,6 +344,15 @@ mod tests {
         assert_eq!(q.client.version, "2.7.10.6");
     }
 
+    /// `scripts/smoke.sh --prod` relies on this split to tell its own
+    /// requests apart in /stats and the logs.
+    #[test]
+    fn smoke_client_code_splits_into_vendor_and_version() {
+        let q = parse("ping=1&client=GWCEsmoke").unwrap();
+        assert_eq!(q.client.vendor, "GWCE");
+        assert_eq!(q.client.version, "smoke");
+    }
+
     #[test]
     fn vendor_is_uppercased_and_version_may_be_empty() {
         let q = parse("ping=1&client=raza").unwrap();

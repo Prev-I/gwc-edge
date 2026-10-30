@@ -105,8 +105,11 @@ cache inserts.
 
   ```bash
   curl -s -A 'Shareaza 2.7.10.6' -H 'Accept:' -H 'Accept-Encoding:' \
-    'http://gwc.example.org/?get=1&hostfile=1&net=gnutella2&ping=1&client=RAZA2.7.10.6'
+    'http://gwc.example.org/?get=1&hostfile=1&net=gnutella2&ping=1&client=GWCEsmoke'
   ```
+
+  `GWCEsmoke` is the client code `smoke.sh --prod` sends, so these requests
+  are not counted as a real client's.
 
 - the `cron` line shows `verification_failed: false` and `subrequests` at
   most 45;
@@ -253,7 +256,7 @@ Leave the cache running for a week. Then look at the following:
 | Uptime as Shareaza sees it | `prod-smoke` workflow, `/healthz` | green every day; `status: ok`, `cron: ok` |
 | Hubs listed | `/stats` `hubs.served` | close to the G2 network's hub count (about 35, http://crawler.doxu.org/) |
 | `dead` rows | `/stats` `hubs.dead` | stable or slowly varying; not climbing towards 1,000 |
-| Requests | `/stats` `requests` | mostly `RAZA` or `RAZI` hostfile and urlfile gets; `limited` and `denied` small |
+| Requests | `/stats` `requests` | mostly `RAZA` or `RAZI` hostfile and urlfile gets (`client` `GWCE`, `version` `smoke`, is `smoke.sh --prod` or the stage 1 `curl`); `limited` and `denied` small |
 | D1 health | `/stats` `health` | `d1_errors_24h` and `degraded_responses_24h` at 0 |
 | D1 budget | Cloudflare dashboard → D1 → gwc-edge → Metrics | rows written well under 100,000 a day (expected about 5,000); rows read under 5 million |
 | Cron cost | `cron`, `cron_hub` and `cron_leaks` log lines | `ms` under 120,000 (it includes `slot_wait_ms`, the waits for leaked sockets' slots, ADR-0020; the final wait for leaked sockets comes after it, in `cron_leaks` `waited_ms`); `subrequests` under 45, which also settles whether sockets count as subrequests; `leaked_sockets` only as stage 1 allows (ADR-0019); `skipped_budget` above 0 only with `subrequests` at 45 or `slot_wait_ms` of at least 15,000 (ADR-0020 tightens stage 1's rule: a leaked socket's slot comes back once its close succeeds) |
