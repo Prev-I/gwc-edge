@@ -19,8 +19,8 @@ pub enum Net {
 pub struct Client {
     /// Four-character vendor code, uppercased, e.g. `RAZA`.
     pub vendor: String,
-    /// Version, sanitised to `[A-Za-z0-9._-]` and at most
-    /// [`MAX_VERSION_LEN`] characters. May be empty.
+    /// Version: its leading `[A-Za-z0-9._-]` characters, at most
+    /// [`MAX_VERSION_LEN`] of them. May be empty.
     pub version: String,
 }
 
@@ -208,6 +208,11 @@ fn truthy(v: &str) -> bool {
 
 /// Split `client=` into vendor and version. Shareaza glues the version to the
 /// vendor code on G2 (`:1423-1424`, `:1862-1863`); `version=` wins if present.
+///
+/// The version ends at the first character it does not keep, rather than
+/// skipping it: when WinINet doubles a query (`docs/protocol.md`, "Cache URL
+/// validity"), an update's `client=` value runs on into `?ip=<requester>`,
+/// and skipping would keep part of that address.
 fn client(client: Option<&str>, version: Option<&str>) -> Result<Client, QueryError> {
     let client = client
         .filter(|c| !c.is_empty())
@@ -221,7 +226,7 @@ fn client(client: Option<&str>, version: Option<&str>) -> Result<Client, QueryEr
         vendor: vendor.to_ascii_uppercase(),
         version: version
             .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
             .take(MAX_VERSION_LEN)
             .collect(),
     })
@@ -361,10 +366,56 @@ mod tests {
     }
 
     #[test]
-    fn version_is_sanitised_and_truncated() {
-        let q = parse("ping=1&client=RAZA2.7<script>10.6-beta_1.2345678901234567890").unwrap();
-        assert_eq!(q.client.version, "2.7script10.6-be");
+    fn version_stops_at_the_first_character_it_does_not_keep() {
+        let q = parse("ping=1&client=RAZA2.7<script>10.6").unwrap();
+        assert_eq!(q.client.version, "2.7");
+        let q = parse("ping=1&client=RAZA&version=2.7.10.6%20beta").unwrap();
+        assert_eq!(q.client.version, "2.7.10.6");
+        // A peer cache's `version=gwc-edge+0.4.0` (`+` decodes to a space).
+        let q = parse("ping=1&client=GWCE&version=gwc-edge+0.4.0").unwrap();
+        assert_eq!(q.client.version, "gwc-edge");
+    }
+
+    #[test]
+    fn version_is_truncated() {
+        let q = parse("ping=1&client=RAZA2.7.10.6-beta_1.2345678901234567890").unwrap();
+        assert_eq!(q.client.version, "2.7.10.6-beta_1.");
         assert_eq!(q.client.version.len(), MAX_VERSION_LEN);
+    }
+
+    /// Shareaza on Windows 10 sent the query twice, joined by a second `?`,
+    /// when the cache URL was stored without a path (`http://host` rather
+    /// than `http://host/`); most likely WinINet's doing. Observed in the
+    /// field on 2026-11-09 (`docs/protocol.md`, "Cache URL validity").
+    fn doubled(query: &str) -> String {
+        let q = query.strip_prefix('?').unwrap_or(query);
+        format!("?{q}?{q}")
+    }
+
+    #[test]
+    fn doubled_gets_read_as_the_plain_ones() {
+        for plain in [
+            SHAREAZA_G2_HOSTFILE,
+            SHAREAZA_G2_URLFILE,
+            SHAREAZA_G1_HOSTFILE,
+        ] {
+            assert_eq!(parse(&doubled(plain)), parse(plain), "{plain}");
+        }
+    }
+
+    #[test]
+    fn doubled_update_keeps_the_hub_address_out_of_the_version() {
+        // The first copy ends in `client=…` (G2) or `version=…` (G1), so the
+        // join glues the second copy's first parameter, `?ip=<hub>:<port>`
+        // or `?url=…`, to the version.
+        let submit =
+            "?url=http%3A%2F%2Fgwc.example.org%2F&update=1&net=gnutella2&client=RAZA2.7.10.6";
+        let g1 = "?ip=203.0.113.7:6346&update=1&net=gnutella&client=RAZA&version=2.7.10.6";
+        for plain in [SHAREAZA_G2_UPDATE, submit, g1] {
+            let q = parse(&doubled(plain)).unwrap();
+            assert_eq!(q, parse(plain).unwrap(), "{plain}");
+            assert_eq!(q.client, raza(), "{plain}");
+        }
     }
 
     #[test]
@@ -473,6 +524,8 @@ mod tests {
         );
         assert!(longest.len() < 1_200);
         assert!(parse(&longest).is_ok());
+        // Doubled by WinINet (see `doubled`), it must still fit.
+        assert_eq!(parse(&doubled(&longest)), parse(&longest));
         let padded = format!(
             "{longest}&pad={}",
             "x".repeat(MAX_QUERY - longest.len() - 5)
