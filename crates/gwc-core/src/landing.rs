@@ -40,11 +40,21 @@ pub fn render(page: &Page) -> String {
          <h2>Add this cache to Shareaza</h2><p><code>{}</code></p>\
          <p class=\"m\">In Shareaza: Discovery → right-click → Add Service…, Type: G2 GWebCache. \
          Keep <b>http://</b>: \
-         Shareaza 2.7 cannot use https://.</p>",
+         Shareaza 2.7 cannot use https://.",
         esc(&crate::product_id()),
         esc(page.git_sha),
         esc(page.canonical_url),
     );
+    // Only for a URL that ends in `/`: told this about `…/gwc.php`, a user
+    // might add one, and `route::classify` would no longer match the path.
+    // Why the slash matters: `docs/protocol.md`, "Cache URL validity".
+    if page.canonical_url.ends_with('/') {
+        h.push_str(
+            " Keep the final <b>/</b> too: without it, Shareaza sends every \
+             query twice in one request.",
+        );
+    }
+    h.push_str("</p>");
     match page.stats {
         Some(s) => numbers(&mut h, s),
         None => {
@@ -249,6 +259,24 @@ mod tests {
             html.contains("https://"),
             "the note names https:// as the wrong scheme"
         );
+    }
+
+    #[test]
+    fn asks_to_keep_the_trailing_slash_only_when_there_is_one() {
+        // Added by hand without it, Shareaza on Windows sends every query
+        // twice (`docs/protocol.md`, "Cache URL validity").
+        let html = page(None);
+        assert!(html.contains("final <b>/</b>"), "{html}");
+        assert!(html.contains("cannot use https://. Keep the final"));
+        assert!(html.contains("one request.</p>"));
+
+        let html = render(&Page {
+            canonical_url: "http://gwc.example.org/gwc.php",
+            git_sha: "a1b2c3d",
+            stats: None,
+        });
+        assert!(!html.contains("final <b>/</b>"), "{html}");
+        assert!(html.contains("cannot use https://.</p>"));
     }
 
     #[test]
