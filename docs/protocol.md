@@ -258,7 +258,10 @@ network.
 
 ## Cache URL validity
 
-`CDiscoveryServices::Add` (`DS:117-238`) and `CheckWebCacheValid` (`DS:297-345`):
+`CDiscoveryServices::Add(LPCTSTR…)` (`DS:117-238`) and `CheckWebCacheValid`
+(`DS:297-345`). They cover every URL Shareaza learns on its own: `u|` lines
+and `gwc:` links. A URL typed into the **Add Service…** dialog skips both
+(see the last item):
 
 - **Clean-up:** the URL is trimmed, then trailing `.` and `/` characters are
   stripped, and one `/` is restored if there was one (`DS:127-132`).
@@ -273,6 +276,28 @@ network.
   all but their last 2 characters (`DS:377-381`).
 - **Query strings:** Shareaza appends `?get=…` to the stored URL (`DS:1413`).
   A URL that already contains `?` therefore cannot work.
+- **A URL typed by hand is stored as typed.** The **Add Service…** dialog
+  accepts any address that starts with `http://` (`DlgDiscoveryService.cpp:116-123`),
+  stores it unchanged (`:139`) and adds it through `Add(CDiscoveryService*)`
+  (`:199`, `DS:240-284`), which runs neither the clean-up nor
+  `CheckWebCacheValid`. So `http://host`, with no path, can be stored this
+  way, and only this way.
+- **A URL without a path gets its query twice** (observed in the field, not
+  in Shareaza's source). The Prev-I fork's 2.7.11.1 on Windows 10 x64, with
+  the cache stored by hand as `http://host` instead of `http://host/`, sent
+  `/?<query>?<query>`: the whole query twice, joined by a second `?`. Stored
+  with the slash, the same client sent it once. Shareaza builds each query
+  once (gets `DS:1413-1434`, updates `DS:1824-1871`) and hands the URL
+  unchanged to WinINet (`DS:1948-1960`, `HR:82-89`, `HR:253-257`), so the
+  doubling most likely happens in WinINet's `InternetOpenUrl`.
+  - Each parameter's first value wins, so a doubled get reads as the plain
+    one: the join lands in `getuptime=1?get=1`, a key nobody reads.
+  - An update ends in `client=` (G2) or `version=` (G1), so the join glues
+    the second copy's first parameter to the version: `?ip=<the hub's
+    address>`, or `?url=…` for a submit. The version therefore ends at its
+    first character outside `[A-Za-z0-9._-]` rather than skipping it, which
+    keeps that address out of logs and counters (ADR-0009). Versions with
+    other characters are cut there too: `gwc-edge+0.4.0` reads as `gwc-edge`.
 
 ## G2 handshake (hub verification)
 
@@ -573,7 +598,7 @@ The Status column uses these values:
 | Plain HTTP: 3xx means redirect, 4xx–5xx means error (`GWC2 §Step 2`). | A GWC request on `/` or the canonical path is answered `200 OK` with a reason phrase. Other answers: 301 only for non-GWC requests on secondary hosts; 404 for GWC parameters on any other path; 405 for methods other than `GET`/`HEAD`; 500 only for a missing or invalid configuration or an internal error. | conforms |
 | A reply beginning `ERROR` is a cache error, and the client drops the cache (`GWC2 §Step 2`). | Never sent. | conforms |
 | Clients handle CR, LF or CRLF line endings (`GWC2 §Step 2`). | `\n` after every line, the last one included. | conforms |
-| Clients must send `client`: a 4-character ID of uppercase letters plus up to 16 version characters (`GWC2 §Step 2`). | Required. Without it, or when its first 4 characters are not all letters or digits, the reply is `i\|error\|client required` or `i\|error\|client needs a 4-character vendor code`. The vendor is the first 4 characters, uppercased; digits and lowercase letters are accepted too. The version is the rest, or `version=` when given, sanitised and cut to 16 characters. | conforms |
+| Clients must send `client`: a 4-character ID of uppercase letters plus up to 16 version characters (`GWC2 §Step 2`). | Required. Without it, or when its first 4 characters are not all letters or digits, the reply is `i\|error\|client required` or `i\|error\|client needs a 4-character vendor code`. The vendor is the first 4 characters, uppercased; digits and lowercase letters are accepted too. The version is the rest, or `version=` when given, ending at its first character outside `[A-Za-z0-9._-]` and cut to 16 characters ("Cache URL validity" says why). | conforms |
 | Parameter order does not matter, and each appears once (`GWC2 §Step 2`). | Order is ignored. If a parameter repeats, the first occurrence wins. | conforms |
 | Values are escape-encoded (RFC 1738) (`GWC2 §Step 2`). | Decoded as `application/x-www-form-urlencoded`, so `+` also decodes to a space. | conforms |
 | Lines are `x\|field\|…`, with `I`, `U` and `H` in capitals (`GWC2 §Step 3`). | Written `i\|`, `u\|` and `h\|` in lowercase. The same clause lets a line start with any letter or digit and asks parsers to be general. Shareaza matches the first field case-insensitively (see "Reading a get response"). The wiki uses lowercase too. | variant |
