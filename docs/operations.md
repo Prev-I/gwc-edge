@@ -108,6 +108,36 @@ invocation log.
 | `health.degraded_responses_24h` | Replies that were not the full reply: a D1 failure, a copy remembered after one, a configuration or internal error. |
 | `generated_at` | When the hourly part (`requests`, `health`) was rendered. |
 
+### Client codes seen in the field
+
+`requests.by_client` lists the 50 most frequent vendor code and version pairs
+of the last 24 h, the rest counted in `other_clients`. Each count is an
+estimate: one sampled request shows as 8, and a client that sent only a few
+requests may be missing on a given day.
+
+The codes below were seen in production on 2026-11-09 and 2026-11-10. The
+request log line never carries the User-Agent; `wrangler tail --format json`
+shows it, under `event.request.headers`. Tail output also carries the
+requester's address and location (`cf-connecting-ip`, the `cf` object): never
+paste it into an issue, a pull request or a document.
+
+| Code, version | User-Agent | What it is |
+|---|---|---|
+| `RAZA 2.7.10.2` | `Shareaza 2.7.10.2` | Shareaza 2.7.10.2, the last official release (SourceForge, 2017). About 60% of the sampled third-party requests over 15 hours on 2026-11-09 and 10. |
+| `RAZI 2.7.10.3` | (not in a tail) | ivan386's iShareaza fork: it moved to 2.7.10.3 on 2017-09-25 and to the vendor code `RAZI` on 2017-10-03 ("Soft name change"), and stayed at 2.7.10.3 until ansani's 2.7.10.4 in 2022. |
+| `RAZI 2.7.11.x` | `iShareaza 2.7.11.x` | The Prev-I fork, this project's oracle (`previ.5` and later). ansani's 2.7.10.4 to 2.7.10.6 builds, and this fork's `previ.1` to `previ.4` (2.7.10.6), send `RAZI` too. |
+| `RAZA 3.0.0.0` | `Shareaza 3.0.0.0` | No official Shareaza 3.0 exists: probably a self-built or relabelled Shareaza. In one evening's tail it queried about every 30 minutes, Shareaza's default access period. |
+| `GNUC 1.1.1.6` | `Mozilla/4.0` | GnucDNA, the Gnucleus engine (around 2004), embedded in applications such as Gnucleus and, reportedly, Morpheus and Kiwi Alpha; which application is not known. |
+| `SHLN 0.2.0` | `Sharelin-0.2.0` | Sharelin, a terminal G2 leaf for Linux and BSD; its project page shows no activity since 2014. It sends both `connection` and a misspelt `conection` header. |
+| `DOXU 1.2` | (not in a tail) | Probably g2paranha, the G2 crawler behind crawler.doxu.org. |
+| `TEST BCII` | `Beacon Cache II 0.8.0.1 (BCII)` | A Beacon Cache II web cache verifying this one: a ping plus a hostfile get. |
+| `SKLL 0.3.6` | `Skulls 0.3.6-<suffix>` | A Skulls web cache verifying this one: a ping. |
+| `GWCE smoke` | `Shareaza 2.7.10.6` | `scripts/smoke.sh --prod`, run by the deploy workflow and the daily `prod-smoke` workflow; the script's header says why it uses its own code. |
+
+"(not in a tail)" means the code was seen only in the sampled counters.
+Treat the identifications as of those dates: a vendor code can be reused, and
+a version can be set by hand.
+
 ## `/healthz`
 
 `status` is `ok` (200), `degraded` (503) or, with a missing or invalid
