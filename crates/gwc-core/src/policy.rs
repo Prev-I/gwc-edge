@@ -114,6 +114,11 @@ mod tests {
             Some(RateKind::Update)
         );
         assert_eq!(kind("ping=1&client=RAZA"), None);
+        assert_eq!(
+            kind("support=1&client=SHLN"),
+            None,
+            "a lone support reads no D1"
+        );
     }
 
     #[test]

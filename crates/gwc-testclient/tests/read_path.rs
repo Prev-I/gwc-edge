@@ -138,6 +138,26 @@ fn g1_get_gets_only_the_self_line() {
 
 #[test]
 #[ignore = "needs a running cache: scripts/integration.sh"]
+fn sharelin_get_carries_the_support_line() {
+    // Sharelin bans a cache whose reply lacks it (ADR-0024). A rate-limited
+    // reply keeps it too, so the shape holds whatever ran before.
+    let r = client().get("?net=gnutella2&support=1&get=1&client=SHLN&version=0.2.0");
+    assert_plain_200(&r);
+    let lines = r.lines();
+    assert_eq!(lines.first(), Some(&"i|support|gnutella2"));
+    assert_eq!(lines.last(), Some(&self_line().as_str()));
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn lone_support_gets_only_the_support_line() {
+    let r = client().get("?support=1&client=SHLN&version=0.2.0");
+    assert_plain_200(&r);
+    assert_eq!(r.lines(), ["i|support|gnutella2"]);
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
 fn denylisted_client_gets_an_empty_body() {
     let r = client().get("?get=1&hostfile=1&net=gnutella2&ping=1&client=CRUX1.0");
     assert_plain_200(&r);

@@ -8,7 +8,10 @@
 use crate::cache_url::CacheUrl;
 
 /// The query parameters that make a request a GWebCache request.
-pub const GWC_PARAMS: [&str; 7] = ["get", "ping", "update", "ip", "url", "hostfile", "urlfile"];
+/// `support` is Skulls' extension (ADR-0024): Sharelin sends it with every get.
+pub const GWC_PARAMS: [&str; 8] = [
+    "get", "ping", "update", "ip", "url", "hostfile", "urlfile", "support",
+];
 
 /// The request method, as far as routing cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn any_of_the_seven_params_is_gwc() {
+    fn any_gwc_param_is_gwc() {
         for p in GWC_PARAMS {
             assert_eq!(
                 route(Method::Get, HOST, "/", &format!("{p}=1")),
@@ -139,6 +142,11 @@ mod tests {
             );
         }
         assert_eq!(route(Method::Get, HOST, "/", SHAREAZA), Route::Gwc);
+        assert_eq!(
+            route(Method::Get, HOST, "/", "support=1&client=SHLN"),
+            Route::Gwc,
+            "a lone support query"
+        );
     }
 
     #[test]

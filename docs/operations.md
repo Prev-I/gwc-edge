@@ -130,7 +130,7 @@ paste it into an issue, a pull request or a document.
 | `RAZA 2.2.3.0` | (not in a tail) | Shareaza 2.2.3.0: its source carried that version from November to December 2006 (2.2.4.0). First sampled on 2026-11-13. |
 | `ENVY 4.0` | `Envy 4.0` | Envy 4.0, GetEnvy's multi-network P2P client for Windows: tagged `4.0` on 2020-01-21, moved to 4.1 on 2020-02-13. It reports only major.minor, glued to the code on G2 (`client=ENVY4.0`). First sampled on 2026-11-13. |
 | `GNUC 1.1.1.6` | `Mozilla/4.0` | GnucDNA, the Gnucleus engine (around 2004), embedded in applications such as Gnucleus and, reportedly, Morpheus and Kiwi Alpha; which application is not known. |
-| `SHLN 0.2.0` | `Sharelin-0.2.0` | Sharelin, a terminal G2 leaf for Linux and BSD; its project page shows no activity since 2014. It sends both `connection` and a misspelt `conection` header. |
+| `SHLN 0.2.0` | `Sharelin-0.2.0` | Sharelin, a terminal G2 leaf for Linux and BSD; its project page shows no activity since 2014. It sends both `connection` and a misspelt `conection` header. It asks with `support=1`, and bans a cache whose reply lacks `i\|support\|gnutella2` (ADR-0024). |
 | `DOXU 1.2` | (not in a tail) | Probably g2paranha, the G2 crawler behind crawler.doxu.org. |
 | `TEST BCII` | `Beacon Cache II 0.8.0.1 (BCII)` | A Beacon Cache II web cache verifying this one: a ping plus a hostfile get. |
 | `SKLL 0.3.6` | `Skulls 0.3.6-<suffix>` | A Skulls web cache verifying this one: a ping. |

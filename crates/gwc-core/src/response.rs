@@ -18,9 +18,13 @@ use std::net::SocketAddrV4;
 use crate::cache_url::CacheUrl;
 use crate::query::{Net, Query};
 
-/// Networks advertised in the pong. Shareaza fails a G2 query whose pong does
-/// not list `gnutella2` (`:1652-1667`).
-pub const NETWORKS: &str = "gnutella2";
+/// The one network this cache serves, named by the `support` line (ADR-0024).
+/// Sharelin bans a cache whose reply lacks exactly `i|support|gnutella2`.
+pub const NETWORK: &str = "gnutella2";
+
+/// Networks advertised in the pong, joined by `-`. Shareaza fails a G2 query
+/// whose pong does not list `gnutella2` (`:1652-1667`).
+pub const NETWORKS: &str = NETWORK;
 
 /// Seconds advertised in `i|update|period|`. Shareaza keeps it per cache
 /// (`:1927-1934`) and defaults it to `Discovery.DefaultUpdate`, one hour
@@ -83,6 +87,8 @@ impl Refusal {
 pub enum Line {
     /// `i|pong|gwc-edge <version>|gnutella2`
     Pong,
+    /// `i|support|gnutella2`: the answer to `support=1` (ADR-0024).
+    Support,
     /// `h|<ip>:<port>|<age>[|<cluster>|<leaves>|<vendor>|<uptime>|<leaf limit>]`
     Host(HostEntry),
     /// `u|<url>|<age>`
@@ -103,6 +109,7 @@ impl Line {
     pub fn render(&self) -> String {
         match self {
             Line::Pong => format!("i|pong|{}|{NETWORKS}", crate::product_id()),
+            Line::Support => format!("i|support|{NETWORK}"),
             Line::Host(h) => h.render(),
             Line::Url(u) => format!("u|{}|{}", u.url, u.age.min(MAX_AGE)),
             Line::UpdatePeriod(secs) => format!("i|update|period|{secs}"),
@@ -179,6 +186,7 @@ pub fn render(lines: &[Line]) -> String {
 ///   reply would get this cache removed for G2 as well, since removal deletes
 ///   the whole entry.
 /// - The pong is sent only when asked for: on G2, or for a ping without a get.
+/// - `support=1` adds `i|support|gnutella2` after the pong, on any network.
 /// - A rate-limited get is answered by calling this with no hosts and no
 ///   caches: Shareaza still counts it a success, and no D1 row is read.
 /// - `self_url` is not repeated if it is also among `caches`.
@@ -197,6 +205,11 @@ pub fn get_reply(
     // no allowed client ever receives an empty body.
     if q.ping && (g2 || !files) {
         lines.push(Line::Pong);
+    }
+    // What this cache serves, on any network, as Skulls answers it. Shareaza
+    // never asks, and would ignore the line (ADR-0024).
+    if q.support {
+        lines.push(Line::Support);
     }
     if g2 && q.hostfile {
         lines.extend(hosts.iter().cloned().map(Line::Host));
@@ -571,6 +584,87 @@ mod tests {
             shareaza::get(&render(&lines), false, &[&self_url().url]),
             Outcome::Success,
             "a G1 parser accepts it"
+        );
+    }
+
+    // --- support=1: Skulls' extension, which Sharelin requires ----------------
+
+    /// Sharelin's only request to a cache, the same from 0.2.0
+    /// (`src/discovery.cpp:113`) to trunk (`src/g2net/discovery.cpp:120`): it
+    /// bans a cache whose reply has no `i|support|gnutella2` line.
+    const SHARELIN: &str = "net=gnutella2&support=1&get=1&client=SHLN&version=0.2.5";
+
+    #[test]
+    fn support_line_renders() {
+        assert_eq!(Line::Support.render(), "i|support|gnutella2");
+    }
+
+    #[test]
+    fn sharelin_get_carries_the_support_line() {
+        let q = parse(SHARELIN).unwrap();
+        let caches = [cache("http://other.example.net/gwc/", 5)];
+        assert_eq!(
+            rendered(&get_reply(&q, &[host(10)], &caches, &self_url())),
+            [
+                "i|support|gnutella2",
+                "h|8.8.4.4:6346|10",
+                "u|http://other.example.net/gwc/|5",
+                "u|http://gwc.example.org/|0",
+            ]
+        );
+    }
+
+    #[test]
+    fn support_line_follows_the_pong() {
+        let q = parse("ping=1&support=1&get=1&hostfile=1&net=gnutella2&client=TEST").unwrap();
+        let lines = get_reply(&q, &[], &[], &self_url());
+        assert_eq!(lines[..2], [Line::Pong, Line::Support]);
+    }
+
+    #[test]
+    fn support_is_answered_on_any_network() {
+        // It says what this cache serves, whatever the query's network (as
+        // Skulls does): a G1 get gets it beside the self line.
+        let q = parse("support=1&get=1&hostfile=1&net=gnutella&client=TEST").unwrap();
+        assert_eq!(
+            rendered(&get_reply(&q, &[host(1)], &[], &self_url())),
+            ["i|support|gnutella2", "u|http://gwc.example.org/|0"]
+        );
+    }
+
+    #[test]
+    fn lone_support_is_just_the_support_line() {
+        let q = parse("support=1&client=SHLN&version=0.2.5").unwrap();
+        assert_eq!(get_reply(&q, &[host(1)], &[], &self_url()), [Line::Support]);
+    }
+
+    #[test]
+    fn no_support_line_unless_asked() {
+        for query in [
+            G2_HOSTS,
+            G2_URLS,
+            "support=0&get=1&net=gnutella2&client=TEST",
+        ] {
+            let q = parse(query).unwrap();
+            assert!(
+                !get_reply(&q, &[host(1)], &[], &self_url()).contains(&Line::Support),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn shareaza_ignores_the_support_line() {
+        // Shareaza never sends support=1 (`DS:1417` is commented out), and has
+        // no case for `i|support|` (`DS:1631-1749`): the line changes nothing.
+        // With no hosts and no caches (the rate-limited shape), the reply is the
+        // support line and the self line: still a success.
+        let q = parse(SHARELIN).unwrap();
+        let body = render(&get_reply(&q, &[], &[], &self_url()));
+        assert_eq!(body, "i|support|gnutella2\nu|http://gwc.example.org/|0\n");
+        assert_eq!(
+            shareaza::get(&body, true, &[&self_url().url]),
+            Outcome::Success
         );
     }
 
