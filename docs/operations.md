@@ -115,7 +115,7 @@ of the last 24 h, the rest counted in `other_clients`. Each count is an
 estimate: one sampled request shows as 8, and a client that sent only a few
 requests may be missing on a given day.
 
-The codes below were seen in production on 2026-11-09 and 2026-11-10. The
+The codes below were seen in production from 2026-11-09 to 2026-11-13. The
 request log line never carries the User-Agent; `wrangler tail --format json`
 shows it, under `event.request.headers`. Tail output also carries the
 requester's address and location (`cf-connecting-ip`, the `cf` object): never
@@ -127,6 +127,8 @@ paste it into an issue, a pull request or a document.
 | `RAZI 2.7.10.3` | (not in a tail) | ivan386's iShareaza fork: it moved to 2.7.10.3 on 2017-09-25 and to the vendor code `RAZI` on 2017-10-03 ("Soft name change"), and stayed at 2.7.10.3 until ansani's 2.7.10.4 in 2022. |
 | `RAZI 2.7.11.x` | `iShareaza 2.7.11.x` | The Prev-I fork, this project's oracle (`previ.5` and later). ansani's 2.7.10.4 to 2.7.10.6 builds, and this fork's `previ.1` to `previ.4` (2.7.10.6), send `RAZI` too. |
 | `RAZA 3.0.0.0` | `Shareaza 3.0.0.0` | No official Shareaza 3.0 exists: probably a self-built or relabelled Shareaza. In one evening's tail it queried about every 30 minutes, Shareaza's default access period. |
+| `RAZA 2.2.3.0` | (not in a tail) | Shareaza 2.2.3.0: its source carried that version from November to December 2006 (2.2.4.0). First sampled on 2026-11-13. |
+| `ENVY 4.0` | `Envy 4.0` | Envy 4.0, GetEnvy's multi-network P2P client for Windows: tagged `4.0` on 2020-01-21, moved to 4.1 on 2020-02-13. It reports only major.minor, glued to the code on G2 (`client=ENVY4.0`). First sampled on 2026-11-13. |
 | `GNUC 1.1.1.6` | `Mozilla/4.0` | GnucDNA, the Gnucleus engine (around 2004), embedded in applications such as Gnucleus and, reportedly, Morpheus and Kiwi Alpha; which application is not known. |
 | `SHLN 0.2.0` | `Sharelin-0.2.0` | Sharelin, a terminal G2 leaf for Linux and BSD; its project page shows no activity since 2014. It sends both `connection` and a misspelt `conection` header. |
 | `DOXU 1.2` | (not in a tail) | Probably g2paranha, the G2 crawler behind crawler.doxu.org. |
