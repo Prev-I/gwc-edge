@@ -49,8 +49,10 @@ a GitHub account.
 2. **Enable workflows** in the fork's **Actions** tab. They do not run in a
    fork until you do.
 3. **Choose the canonical URL** ([step 1 of Deploying](#1-choose-the-canonical-url)).
-4. **Create the `production` environment**, its two secrets and the
-   `GWC_CANONICAL_URL` variable ([Deploy from GitHub](#4-deploy-from-github-optional)).
+4. **Create the `production` environment** with its two secrets, and the
+   **repository** variable `GWC_CANONICAL_URL`
+   ([Deploy from GitHub](#4-deploy-from-github-optional)). Not an environment
+   variable: `prod-smoke` runs outside the environment and would skip.
    GitHub Free allows environments on public repositories, which a fork of
    this one is.
 5. **Set the zone settings** by hand ([Zone settings](#3-zone-settings)).
@@ -60,17 +62,19 @@ a GitHub account.
    manual run of `deploy` alone is refused until CI has passed on that
    commit (ADR-0018, ADR-0025).
 7. **Enable `prod-smoke`** in the Actions tab: scheduled workflows stay
-   disabled in a fork until you enable them. To report a failure it opens an
-   issue, so keep Issues enabled (Settings → General → Features).
+   disabled in a fork until you enable them. It reports a failure by opening
+   an issue, so make sure Issues are enabled (Settings → General →
+   Features).
 8. **To update,** use **Sync fork** on the fork's page. GitHub does not
    document whether a sync starts the fork's `ci`; if no run appears, run
    `ci` by hand on `main` again. GitHub also disables scheduled workflows
    after 60 days without activity in a public repository: re-enable
    `prod-smoke` when that happens.
 
-The deploy looks up the D1 database by its name, `gwc-edge`: if your
-Cloudflare account already has a database of that name used for something
-else, use another account. Once the cache answers,
+The Worker and the D1 database are both named `gwc-edge`: if your
+Cloudflare account already has a Worker or a D1 database of that name used
+for something else, use another account. The deploy would replace that
+Worker, and run the migrations against that database. Once the cache answers,
 [Getting listed](#getting-listed) applies as to any instance.
 
 ## Deploying
