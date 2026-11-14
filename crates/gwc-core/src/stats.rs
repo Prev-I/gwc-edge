@@ -86,8 +86,9 @@ pub struct Hourly {
     pub health: Health,
 }
 
-/// Hub counts. Statuses count only hubs seen within the 2 h listing window,
-/// so `verified` and `alive_full` are what clients can be given now.
+/// Hub counts. `verified` and `alive_full` count only hubs seen within the 2 h
+/// listing window, so they are what clients can be given now; `unverified` and
+/// `dead` count every row with that status.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HubCounts {
@@ -224,8 +225,9 @@ pub fn hourly(totals: Totals, now: u64) -> Hourly {
     }
 }
 
-/// Hub counts from `SELECT status, COUNT(*) ... WHERE last_seen within the
-/// window GROUP BY status`, the number served now, and the total row count.
+/// Hub counts from `SELECT status, COUNT(*) ... GROUP BY status`, with the 2 h
+/// window applied to `verified` and `alive_full` only, the number served now,
+/// and the total row count.
 #[must_use]
 pub fn hub_counts(by_status: &[(String, u64)], served: u64, total: u64) -> HubCounts {
     let n = |s: &str| {

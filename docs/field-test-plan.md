@@ -26,15 +26,18 @@ fails, and use `docs/operations.md` to find out why.
 - [ ] **The `prod-smoke` workflow** is green, if you deploy from GitHub.
 - [ ] **Workers Logs are open:** Workers & Pages → gwc-edge → Observability.
   Also open the `/stats` page.
-- [ ] **A Windows machine or VM with Shareaza 2.7.10.x.**
-  - Prefer the official 2.7.10.2, which most of the G2 network runs and
-    which sends `client=RAZA`.
+- [ ] **A Windows machine or VM with Shareaza 2.7.10.2 or a Prev-I fork
+  release.**
+  - The official 2.7.10.2 is what most of the G2 network runs, and sends
+    `client=RAZA`.
   - The `docs/ORACLE.md` of github.com/Prev-I/Shareaza covers running
-    2.7.10.2 and that fork's 2.7.10.6 under Wine on Linux. WSL2 is untested
-    there.
-  - The 2.7.10.6 build sends `client=RAZI`, not `RAZA`. The same document
-    warns that it has known security flaws. Stage 3 keeps the client running
-    as a public hub for hours: stay with it, or use 2.7.10.2.
+    2.7.10.2 and the fork's current release (2.7.11.x) under Wine on Linux.
+    WSL2 is untested there.
+  - The fork's builds send `client=RAZI`, not `RAZA`. Stages 2 and 3 were run
+    with its 2.7.11.1 and 2.7.11.2. The same document lists the security
+    flaws its audit found in code added after 2.7.10.2, and the fork releases
+    that fix them. Stage 3 keeps the client running as a public hub for hours:
+    stay with it.
   - For stage 3 you also need:
     - a public IPv4 address, not behind carrier-grade NAT;
     - one TCP port forwarded to it (Shareaza's default is 6346).
@@ -46,7 +49,8 @@ Throughout, `http://gwc.example.org/` stands for your canonical URL.
 ## Stage 1: seed the cache
 
 A new cache knows no hubs. Seed it once from `dkac`, the one other G2 cache
-known to be alive, then let the cron verify what came in:
+known to be alive when this plan was written, then let the cron verify what
+came in:
 
 ```bash
 GWC_CANONICAL_URL=http://gwc.example.org/ scripts/seed.sh fetch seed.sql
@@ -96,8 +100,9 @@ cache inserts.
 - a `cron_leaks` line after any run that completes with leaked sockets;
 - on `/stats`, `hubs.served`.
 
-`/stats` also carries the last run's `cron` figures, the same fields as the
-`cron` log line, so the counters can be followed without the logs.
+`/stats` also carries the last run's `cron` figures, most fields of the `cron`
+log line (see `docs/operations.md`), so the counters can be followed without
+the logs.
 
 **Passing:**
 - at least one seeded hub is `verified` or `alive_full`;
@@ -156,7 +161,7 @@ Menu names may differ slightly between builds.
 - **Workers Logs:** within a minute, a `hostfile` line, then a `urlfile`
   line right after it. Shareaza sends the urlfile query only while it knows
   fewer than 10 caches. Both lines should have `client: "RAZA"` (`"RAZI"`
-  for the 2.7.10.6 fork), the Shareaza version, `outcome: "ok"`, and for
+  for the Prev-I fork), the Shareaza version, `outcome: "ok"`, and for
   the hostfile `hosts_sent` above 0.
 - **Shareaza's Discovery window:** this cache's access count goes up, and its
   failure count stays at 0. Two failures in a row remove a cache from

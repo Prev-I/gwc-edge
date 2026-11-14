@@ -49,7 +49,7 @@ No line carries the requester's address.
 **Other lines** are not requests: they carry an `event`, no `outcome`.
 - `{"level":"error","event":"d1_error","statement":…,"error":…}`: a D1 call failed. `statement` is a name (`read_snapshot`, `live_snapshot`, `binding`, …), never SQL; `error` is D1's own text.
 - `{"level":"error","event":"internal_error",…}`: a handler failed; the request line follows with kind `internal_error`.
-- `{"level":"error","event":"cron_failed",…}`: the cron failed.
+- `{"kind":"cron","event":"cron_failed","error":…}`: the cron failed. It has no `level`, and comes right after a `d1_error` line with `statement: "cron"`, written for any cron error, D1 or not. A filter on `kind == "cron"` therefore matches failed runs as well as the per-run summary below; add `event` to tell them apart.
 - `{"level":"warn","event":"rows_dropped",…}`: rows that could not be decoded were skipped.
 - `{"level":"warn","event":"snapshot_unparsable",…}`: a stored document this build cannot read; the cron re-renders the stats part on its next run.
 - `{"level":"warn","event":"count_rows_written",…}`: a counter write billed other than 1 row (the budget assumes 1).
@@ -102,11 +102,12 @@ invocation log.
 | `hubs.unverified`, `dead` | All hubs with that status, whatever their age. |
 | `hubs.total` | Every row in `hubs`, expired ones included. |
 | `caches.*` | Rows in `caches` by status. |
-| `cron` | The last cron run: when, how long, and its counts (the fields of the `cron` log line, ADR-0012). `test_dial: true` means an integration-test configuration. |
+| `cron` | The last cron run: `last_run_at` and `last_run_ms`, then the fields of the `cron` log line (ADR-0012) except `ms` (here `last_run_ms`), `hubs_served`, `caches` and `stats_rendered`. `test_dial: true` means an integration-test configuration. |
 | `requests` | The last 24 h, estimated from 1-in-8 sampling (`sample_rate`). |
 | `health.d1_errors_24h` | D1 calls that failed. |
 | `health.degraded_responses_24h` | Replies that were not the full reply: a D1 failure, a copy remembered after one, a configuration or internal error. |
 | `generated_at` | When the hourly part (`requests`, `health`) was rendered. |
+| `schema`, `product`, `git_sha`, `canonical_url`, `window_hours`, `sample_rate` | The document's format version, this build's name and version, its commit, the cache's own URL, the hours the request counts cover (24) and the counters' sampling rate (8). |
 
 ### Client codes seen in the field
 
@@ -125,7 +126,7 @@ paste it into an issue, a pull request or a document.
 |---|---|---|
 | `RAZA 2.7.10.2` | `Shareaza 2.7.10.2` | Shareaza 2.7.10.2, the last official release (SourceForge, 2017). About 60% of the sampled third-party requests over 15 hours on 2026-11-09 and 10. |
 | `RAZI 2.7.10.3` | (not in a tail) | ivan386's iShareaza fork: it moved to 2.7.10.3 on 2017-09-25 and to the vendor code `RAZI` on 2017-10-03 ("Soft name change"), and stayed at 2.7.10.3 until ansani's 2.7.10.4 in 2022. |
-| `RAZI 2.7.11.x` | `iShareaza 2.7.11.x` | The Prev-I fork, this project's oracle (`previ.5` and later). ansani's 2.7.10.4 to 2.7.10.6 builds, and this fork's `previ.1` to `previ.4` (2.7.10.6), send `RAZI` too. |
+| `RAZI 2.7.11.x` | `iShareaza 2.7.11.x` | The Prev-I fork, the client this project tests with (`previ.5` and later). ansani's 2.7.10.4 to 2.7.10.6 builds, and this fork's `previ.1` to `previ.4` (2.7.10.6), send `RAZI` too. |
 | `RAZA 3.0.0.0` | `Shareaza 3.0.0.0` | No official Shareaza 3.0 exists: probably a self-built or relabelled Shareaza. In one evening's tail it queried about every 30 minutes, Shareaza's default access period. |
 | `RAZA 2.2.3.0` | (not in a tail) | Shareaza 2.2.3.0: its source carried that version from November to December 2006 (2.2.4.0). First sampled on 2026-11-13. |
 | `ENVY 4.0` | `Envy 4.0` | Envy 4.0, GetEnvy's multi-network P2P client for Windows: tagged `4.0` on 2020-01-21, moved to 4.1 on 2020-02-13. It reports only major.minor, glued to the code on G2 (`client=ENVY4.0`). First sampled on 2026-11-13. |
@@ -142,10 +143,10 @@ a version can be set by hand.
 
 ## `/healthz`
 
-`status` is `ok` (200), `degraded` (503) or, with a missing or invalid
-`CANONICAL_URL` or `TEST_DIAL`, 500. `test_dial` must be `false` in
-production: when `true`, the cron dials only loopback test peers, so every
-real check fails (ADR-0012). `cron` is:
+`status` is `ok` (HTTP 200) or `degraded` (HTTP 503). With a missing or invalid
+`CANONICAL_URL` or `TEST_DIAL`, `status` is `degraded` and the HTTP code is
+500. `test_dial` must be `false` in production: when `true`, the cron dials
+only loopback test peers, so every real check fails (ADR-0012). `cron` is:
 
 | Value | Meaning |
 |---|---|
