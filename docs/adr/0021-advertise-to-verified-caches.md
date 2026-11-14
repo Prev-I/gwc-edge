@@ -1,6 +1,7 @@
 # ADR-0021: The cron advertises this cache to the caches it verifies
 
-**Status:** proposed, 2026-10-26. Would amend ADR-0012 ("Caches").
+**Status:** proposed, 2026-10-26; revisited 2026-11-14. Would amend ADR-0012
+("Caches").
 
 ## Context
 Other GWebCaches learn about this one in only two ways today:
@@ -141,6 +142,87 @@ record. Until it is made, no Cachechu cache would receive an advertisement.
     That would include this cache's own URL if it resolves into that range.
 - One request from the deployed cron to an echo endpoint answers the first
   two questions: the headers it sends, and the address it comes from.
+- Indirect evidence on both, and a cost found since: see "Revisited,
+  2026-11-14" below.
+
+## Revisited, 2026-11-14
+The record stays *proposed*. The owner decides after field test stage 5 (a
+week of observation, not before 2026-11-17), using what that stage shows.
+
+- **The gate is met.** Field test stages 2 and 3 passed on 2026-11-09: stage 2
+  with the hub match inferred, stage 3 with the hub listed from `X-Try-Hubs`
+  before its first update (`docs/field-test-plan.md`, Results).
+- **The case for it is weaker than when it was proposed.**
+  - Stage 4 found the production instance already listed by dkac, without any
+    announcement (`docs/field-test-plan.md`, Results).
+  - A Skulls cache pinged it at about 14:00 UTC on 2026-11-09. Skulls pings a
+    URL only once something submits it (`WriteCacheFile`, `skulls.php:1204`,
+    `:1244`), most likely a Shareaza hub's `url=`. A Beacon Cache II pinged it
+    too.
+  - On 2026-11-14 `/stats` showed 15 caches verified by this one. That is the
+    audience an advertisement would reach, not how many of them list this
+    cache already.
+  - What advertising would still add is keeping the entry fresh where lists
+    are short: Skulls keeps 50 caches and pushes out the oldest for each new
+    one (Decision, above). Stage 5 should show whether the listings hold
+    without it.
+- **Against a default Skulls, re-advertising can remove the listing.** This
+  changes the Decision's premise that readvertising refreshes the entry.
+  - On 2026-11-14 the production name resolved to two Cloudflare proxy
+    addresses. One was inside `104.16.0.0/12`, which Skulls' default blocklist
+    lists (`ext/gwc-blocklist.dat:737`); the other was outside it.
+  - Skulls resolves a submitted URL with `gethostbyname()`, which returns one
+    address (`ResolveDNS`, `skulls.php:1076-1081`). Which one depends on the
+    order its resolver returns them in.
+  - **A new URL that resolves into the blocklist** is refused as `Blocked URL`
+    and recorded as failed (`skulls.php:1233-1242`, `AddFailedUrl`).
+  - **A listed URL resubmitted after `RECHECK_CACHES` hours** (24 by default,
+    `vars.php:32`; never under 12) is resolved again. If the
+    address is listed, Skulls records it as failed and **deletes the entry**
+    (`skulls.php:1185-1202`, `ReplaceCache(…, null)`).
+  - **A failed URL is then refused for 2 days** before any other check
+    (`CheckFailedUrl`, `skulls.php:708-727`, `:1158`), whichever address DNS
+    gives. That covers Shareaza hubs' `url=` too.
+  - So each weekly re-advertisement to a default Skulls either refreshes the
+    entry or deletes it and blocks the URL there for 2 days. The reply is
+    `I|update|OK|WARNING|Blocked URL` (`skulls.php:2059-2060`), logged
+    `warned`.
+  - The same coin applies when a Shareaza hub submits this cache; advertising
+    would add a throw a week per Skulls.
+  - The Skulls ping at 14:00 shows that, at that moment, that Skulls either
+    resolved the name outside the listed range or runs without the default
+    blocklist: the ping comes after the blocklist check (`:1238-1244`).
+  - This cache cannot change the addresses. They are the Cloudflare proxy's,
+    and a Worker on a Custom Domain is always proxied (ADR-0014); on the Free
+    plan there is no choice of addresses.
+  - If the record is accepted, it should therefore not re-advertise to
+    Skulls, or not advertise to Skulls at all. The pong names the cache's
+    software (`I|pong|Skulls <version>|…`, `skulls.php:484`), so the cron can
+    tell.
+- **The first two open questions have indirect evidence.**
+  - Among the 15 verified caches is a Skulls install on a DNS name on port 80,
+    so the cron reaches it with `fetch()`, sending `client=TEST`
+    (`ping::via`, `ping::query`). That install is hosted outside Cloudflare,
+    which is the case the Cloudflare documentation quoted above covers.
+  - It answers the cron's pings with a pong, so neither
+    `404 ERROR: Invalid identification` nor `403`.
+  - Skulls accepts a `CF-Connecting-IP` header only when the install sets
+    `USING_CLOUDFLARE_CDN` and the connection comes from a Cloudflare address;
+    otherwise it answers 404 (`skulls.php:1802-1817`). So, unless that install
+    sets `USING_CLOUDFLARE_CDN`, the cron's `fetch()` carries no such header.
+    Either way, the address Skulls attributes to the request is not on its
+    blocklist.
+  - This is not conclusive: another Skulls may run with other settings or a
+    newer blocklist. The echo request above would settle it.
+- **If it is accepted**, the work is the one listed under Consequences, "On
+  acceptance", plus the Skulls exclusion above. Concretely:
+  - migration `0003` adds `last_advertised`;
+  - the cron sends at most one advertisement a run, within the ledger and the
+    connection slots;
+  - the reply is classified, and the counts go to the `cron` line;
+  - `docs/protocol.md`, ADR-0012's budget and `docs/operations.md` gain the
+    advertisement;
+  - the fake peer answers it.
 
 ## Consequences
 - **Caches this one verifies learn about it without an operator.** Each such
@@ -160,6 +242,6 @@ record. Until it is made, no Cachechu cache would receive an advertisement.
 - **Schema:** a new migration (ADR-0015) adds one nullable column,
   `last_advertised INTEGER CHECK (last_advertised IS NULL OR last_advertised >= 0)`.
   The cron's cache queue reads it in the statement it already runs.
-- **On acceptance**, `docs/protocol.md` ("Cache verification") and ADR-0012's
-  budget section gain the advertisement, and the test client's fake peer
-  answers it.
+- **On acceptance**, `docs/protocol.md` ("Cache verification"),
+  `docs/operations.md` and ADR-0012's budget section gain the advertisement,
+  and the test client's fake peer answers it.
