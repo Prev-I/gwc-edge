@@ -22,21 +22,23 @@ const run = (over) => ({
   ...over,
 });
 
-/** A fake `gh api`: main's tip and the CI runs it lists for any SHA. */
-const api = ({ tip = SHA, runs = [run()], fail = false } = {}) =>
+/** The one runs query the gate may make: this commit, on main, every event. */
+const runsPath = (sha) =>
+  `repos/o/r/actions/workflows/ci.yml/runs?head_sha=${sha}&branch=main&per_page=100`;
+
+/** A fake `gh api`: main's tip and the CI runs of the commit being checked. */
+const api = ({ tip = SHA, runs = [run()], fail = false, sha }) =>
   async (path) => {
     if (fail) throw new Error("HTTP 502");
-    if (path.endsWith("/commits/main")) return { sha: tip };
-    if (path.includes("/actions/workflows/ci.yml/runs?head_sha=")) {
-      // Every event is fetched: the gate filters, so manual runs are not lost.
-      if (path.includes("event=")) throw new Error(`runs filtered by event: ${path}`);
-      return { workflow_runs: runs };
-    }
+    if (path === "repos/o/r/commits/main") return { sha: tip };
+    // Exactly this query: no event filter (manual runs would be lost), and
+    // still scoped to the commit and to main.
+    if (path === runsPath(sha)) return { workflow_runs: runs };
     throw new Error(`unexpected path ${path}`);
   };
 
 const check = (opts, ref = MAIN, sha = SHA) =>
-  gate({ sha, ref, repo: "o/r", api: api(opts) });
+  gate({ sha, ref, repo: "o/r", api: api({ ...opts, sha }) });
 
 test("green CI on the exact tip of main deploys", async () => {
   const r = await check({});
@@ -121,13 +123,21 @@ test("a commit that is no longer main's tip is skipped, not deployed", async () 
 
 test("any ref but main refuses, before calling the API", async () => {
   for (const ref of ["refs/heads/feature", "refs/tags/v0.1.0", "refs/pull/1/merge", undefined]) {
+    let calls = 0;
     const r = await gate({
       sha: SHA,
       ref,
       repo: "o/r",
-      api: async () => assert.fail("no API call for another ref"),
+      // The gate catches a throwing API as "unavailable", so count calls
+      // instead: a refusal after calling it would also read [false, true].
+      api: async () => {
+        calls += 1;
+        return {};
+      },
     });
     assert.deepEqual([r.deploy, r.fail], [false, true], String(ref));
+    assert.equal(calls, 0, String(ref));
+    assert.match(r.reason, /only main deploys/, String(ref));
   }
 });
 
