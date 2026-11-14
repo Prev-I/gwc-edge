@@ -34,10 +34,12 @@ env:
 jobs:
   deploy:
     name: deploy to Cloudflare
-    # A green CI run of a push to main, or a manual run on main.
+    # A green CI run on main, of a push or started by hand (ADR-0025), or a
+    # manual run of this workflow on main.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
