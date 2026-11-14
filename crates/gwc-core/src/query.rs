@@ -42,10 +42,13 @@ const DEFAULT_NET: &str = "gnutella";
 /// A parsed request. Several commands may be combined in one query: Shareaza
 /// adds `ping=1` to every G2 get, and sends `ip=` and `url=` in one update.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent commands, combined freely in one query
 pub struct Query {
     pub client: Client,
     pub net: Net,
     pub ping: bool,
+    /// `support=1`: answer `i|support|gnutella2` (ADR-0024).
+    pub support: bool,
     /// Hosts were asked for.
     pub hostfile: bool,
     /// Caches were asked for.
@@ -75,7 +78,7 @@ impl Query {
 pub enum QueryError {
     MissingClient,
     BadClient,
-    /// No `ping`, `get`, `hostfile`, `urlfile`, `ip` or `url`.
+    /// No `ping`, `support`, `get`, `hostfile`, `urlfile`, `ip` or `url`.
     NoCommand,
     /// `update=1` with neither `ip=` nor `url=`.
     NothingToUpdate,
@@ -122,10 +125,11 @@ pub fn parse(raw: &str) -> Result<Query, QueryError> {
         urlfile = true;
     }
     let ping = flag(&p.ping);
+    let support = flag(&p.support);
     let nonempty = |v: Option<String>| v.filter(|v| !v.is_empty());
     let (ip, url) = (nonempty(p.ip), nonempty(p.url));
 
-    if !(ping || hostfile || urlfile || ip.is_some() || url.is_some()) {
+    if !(ping || support || hostfile || urlfile || ip.is_some() || url.is_some()) {
         return Err(if flag(&p.update) {
             QueryError::NothingToUpdate
         } else {
@@ -145,6 +149,7 @@ pub fn parse(raw: &str) -> Result<Query, QueryError> {
         client,
         net,
         ping,
+        support,
         hostfile,
         urlfile,
         ip,
@@ -162,6 +167,7 @@ struct Params {
     version: Option<String>,
     net: Option<String>,
     ping: Option<String>,
+    support: Option<String>,
     get: Option<String>,
     hostfile: Option<String>,
     urlfile: Option<String>,
@@ -180,6 +186,7 @@ impl Params {
             "version" => &mut self.version,
             "net" => &mut self.net,
             "ping" => &mut self.ping,
+            "support" => &mut self.support,
             "get" => &mut self.get,
             "hostfile" => &mut self.hostfile,
             "urlfile" => &mut self.urlfile,
@@ -301,6 +308,23 @@ mod tests {
         assert_eq!(q.uptime, Some(7300));
         assert!(q.is_update());
         assert!(!q.ping && !q.hostfile && !q.urlfile);
+    }
+
+    #[test]
+    fn sharelin_query_asks_for_support_and_both_files() {
+        let q = parse("net=gnutella2&support=1&get=1&client=SHLN&version=0.2.5").unwrap();
+        assert!(q.support);
+        assert!(q.hostfile && q.urlfile);
+        assert_eq!(q.client.vendor, "SHLN");
+        assert_eq!(q.client.version, "0.2.5");
+    }
+
+    #[test]
+    fn support_alone_is_a_command() {
+        let q = parse("support=1&client=SHLN").unwrap();
+        assert!(q.support);
+        assert!(!(q.ping || q.hostfile || q.urlfile || q.is_update()));
+        assert_eq!(parse("support=0&client=SHLN"), Err(QueryError::NoCommand));
     }
 
     #[test]

@@ -97,7 +97,8 @@ impl Kind {
     pub fn of(q: &Query) -> Kind {
         let lone_ping = !(q.is_update() || q.hostfile || q.urlfile);
         if lone_ping {
-            // Answered with the pong on any network (`response::get_reply`).
+            // A lone ping or support query: answered on any network, from no
+            // data (`response::get_reply`).
             Kind::Ping
         } else if q.net != Net::Gnutella2 {
             Kind::OtherNet
@@ -222,6 +223,16 @@ mod tests {
             kind("ping=1&client=TEST&version=0.1"),
             Kind::Ping,
             "a lone ping is answered on any network, so it counts as a ping"
+        );
+        assert_eq!(
+            kind("support=1&client=SHLN"),
+            Kind::Ping,
+            "a lone support query costs no D1 read either (ADR-0024)"
+        );
+        assert_eq!(
+            kind("net=gnutella2&support=1&get=1&client=SHLN&version=0.2.5"),
+            Kind::Hostfile,
+            "Sharelin's get counts like any get for both files"
         );
         assert_eq!(
             kind("ip=8.8.4.4:6346&update=1&net=gnutella2&client=RAZA"),
