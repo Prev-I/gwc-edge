@@ -34,4 +34,4 @@ number either way, and from then on the rule above applies.
 | [0022](0022-failed-caches-are-remembered.md) | A cache deleted after failed pings is remembered for 48 h, and its resubmissions and seeds are declined (amends 0012) |
 | [0023](0023-the-cache-ping-carries-a-get.md) | The cache ping carries a urlfile get, so caches that answer a bare ping in GWC1 form can be verified (amends 0012) |
 | [0024](0024-support-is-answered.md) | `support=1` is answered with `i\|support\|gnutella2`, so Sharelin keeps this cache (amends 0008) |
-| [0025](0025-a-manual-ci-run-on-main-counts.md) | **Proposed:** a CI run started by hand on main counts for the deploy gate, so a fork can deploy (would amend 0018) |
+| [0025](0025-a-manual-ci-run-on-main-counts.md) | A CI run started by hand on main counts for the deploy gate, so a fork can deploy (amends 0018) |
