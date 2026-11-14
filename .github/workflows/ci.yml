@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Started by hand on main (a fork's first deploy, or after a sync that ran
+  # nothing), a green run counts for the deploy gate like a push's (ADR-0025).
+  workflow_dispatch:
 
 permissions:
   contents: read

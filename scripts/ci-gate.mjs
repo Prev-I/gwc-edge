@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The deploy workflow's gate (ADR-0018): deploy only the current tip of main,
 // and only once CI has passed on that exact commit, for automatic and manual
-// runs alike.
+// runs alike. The CI run may be one of a push to main or one started by hand
+// on main (ADR-0025).
 //
 //   node scripts/ci-gate.mjs        (in the deploy workflow)
 //
@@ -21,6 +22,9 @@ import { fileURLToPath } from "node:url";
 /** The CI workflow whose success is required. */
 export const CI_WORKFLOW = "ci.yml";
 
+/** The CI run events that count: a push to main, or a run started by hand on main. */
+export const COUNTED_EVENTS = ["push", "workflow_dispatch"];
+
 /**
  * Decide from the facts gathered. `runs` are CI workflow runs for `sha`, as
  * the GitHub API lists them. Returns { deploy, fail, reason }.
@@ -37,10 +41,11 @@ export function decide({ sha, ref, tip, runs }) {
       reason: `${sha} is no longer the tip of main (${tip}); that commit's own run deploys it`,
     };
   }
-  // CI on the push to main for this very commit; a pull request run for the
-  // same SHA tested another ref.
+  // CI on main for this very commit, run by a push or by hand (ADR-0025): both
+  // test the commit itself. A pull request run for the same SHA tested another
+  // ref, and no other event counts.
   const mine = (runs ?? []).filter(
-    (r) => r.head_sha === sha && r.event === "push" && r.head_branch === "main",
+    (r) => r.head_sha === sha && r.head_branch === "main" && COUNTED_EVENTS.includes(r.event),
   );
   if (mine.length === 0) return refuse(`no CI run on main for ${sha}`);
   const latest = mine.reduce((a, b) =>
@@ -61,7 +66,7 @@ export async function gate({ sha, ref, repo, api }) {
     if (ref !== "refs/heads/main") return decide({ sha, ref });
     const tip = (await api(`repos/${repo}/commits/main`)).sha;
     const listed = await api(
-      `repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${sha}&event=push&branch=main&per_page=100`,
+      `repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${sha}&branch=main&per_page=100`,
     );
     return decide({ sha, ref, tip, runs: listed.workflow_runs });
   } catch (e) {

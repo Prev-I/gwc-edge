@@ -27,7 +27,11 @@ const api = ({ tip = SHA, runs = [run()], fail = false } = {}) =>
   async (path) => {
     if (fail) throw new Error("HTTP 502");
     if (path.endsWith("/commits/main")) return { sha: tip };
-    if (path.includes("/actions/workflows/ci.yml/runs?head_sha=")) return { workflow_runs: runs };
+    if (path.includes("/actions/workflows/ci.yml/runs?head_sha=")) {
+      // Every event is fetched: the gate filters, so manual runs are not lost.
+      if (path.includes("event=")) throw new Error(`runs filtered by event: ${path}`);
+      return { workflow_runs: runs };
+    }
     throw new Error(`unexpected path ${path}`);
   };
 
@@ -67,6 +71,36 @@ test("green CI for another commit, ref or event does not count", async () => {
     const r = await check({ runs: [other] });
     assert.deepEqual([r.deploy, r.fail], [false, true], JSON.stringify(other));
   }
+});
+
+test("green manual CI on the exact tip of main deploys", async () => {
+  const r = await check({ runs: [run({ event: "workflow_dispatch" })] });
+  assert.equal(r.deploy, true);
+  assert.equal(r.fail, false);
+});
+
+test("manual CI on another branch does not count", async () => {
+  const r = await check({ runs: [run({ event: "workflow_dispatch", head_branch: "feature" })] });
+  assert.deepEqual([r.deploy, r.fail], [false, true]);
+  assert.match(r.reason, /no CI run/);
+});
+
+test("CI from other events does not count", async () => {
+  for (const event of ["schedule", "repository_dispatch", "merge_group", "pull_request"]) {
+    const r = await check({ runs: [run({ event })] });
+    assert.deepEqual([r.deploy, r.fail], [false, true], event);
+  }
+});
+
+test("the latest run decides across push and manual runs", async () => {
+  const r = await check({
+    runs: [run({ run_number: 7 }), run({ run_number: 8, event: "workflow_dispatch", conclusion: "failure" })],
+  });
+  assert.equal(r.fail, true);
+  const again = await check({
+    runs: [run({ run_number: 7, conclusion: "failure" }), run({ run_number: 8, event: "workflow_dispatch" })],
+  });
+  assert.equal(again.deploy, true);
 });
 
 test("the latest run decides: a later failed re-run beats an earlier success", async () => {

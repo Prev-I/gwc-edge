@@ -38,6 +38,45 @@ Documentation:
 | `docs/operations.md` | Logs, `/stats`, `/healthz`, expected failure modes |
 | `docs/field-test-plan.md` | Seeding, a real Shareaza as leaf and hub, announcing the cache, a week of observation |
 
+## Run your own (from a fork)
+
+The quickest way to a cache of your own needs no local toolchain: fork this
+repository and let the fork's GitHub Actions build, migrate, deploy and check
+it. You need a domain on Cloudflare (see [Deploying](#deploying) for why) and
+a GitHub account.
+
+1. **Fork** `Prev-I/gwc-edge`.
+2. **Enable workflows** in the fork's **Actions** tab. They do not run in a
+   fork until you do.
+3. **Choose the canonical URL** ([step 1 of Deploying](#1-choose-the-canonical-url)).
+4. **Create the `production` environment** with its two secrets, and the
+   **repository** variable `GWC_CANONICAL_URL`
+   ([Deploy from GitHub](#4-deploy-from-github-optional)). Not an environment
+   variable: `prod-smoke` runs outside the environment and would skip.
+   GitHub Free allows environments on public repositories, which a fork of
+   this one is.
+5. **Set the zone settings** by hand ([Zone settings](#3-zone-settings)).
+6. **Run the `ci` workflow by hand on `main`** (Actions → ci → Run workflow).
+   When it passes, `deploy` starts on its own: it creates the D1 database,
+   applies the migrations, deploys the Worker and runs the smoke check. A
+   manual run of `deploy` alone is refused until CI has passed on that
+   commit (ADR-0018, ADR-0025).
+7. **Enable `prod-smoke`** in the Actions tab: scheduled workflows stay
+   disabled in a fork until you enable them. It reports a failure by opening
+   an issue, so make sure Issues are enabled (Settings → General →
+   Features).
+8. **To update,** use **Sync fork** on the fork's page. GitHub does not
+   document whether a sync starts the fork's `ci`; if no run appears, run
+   `ci` by hand on `main` again. GitHub also disables scheduled workflows
+   after 60 days without activity in a public repository: re-enable
+   `prod-smoke` when that happens.
+
+The Worker and the D1 database are both named `gwc-edge`: if your
+Cloudflare account already has a Worker or a D1 database of that name used
+for something else, use another account. The deploy would replace that
+Worker, and run the migrations against that database. Once the cache answers,
+[Getting listed](#getting-listed) applies as to any instance.
+
 ## Deploying
 
 This takes about 15 minutes on a free Cloudflare account. You need:
@@ -138,6 +177,8 @@ scripts/smoke.sh --prod http://gwc.example.org/
 ```
 
 ### 4. Deploy from GitHub (optional)
+
+This is the path a fork takes ([Run your own](#run-your-own-from-a-fork)).
 
 `.github/workflows/deploy.yml` deploys `main` after CI passes on it, or when
 started by hand on `main`. Either way it first checks, through the GitHub

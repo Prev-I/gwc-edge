@@ -256,7 +256,8 @@ ever listed. Remove the variable.
 
 `scripts/deploy.sh` applies the migrations, then deploys the Worker
 (ADR-0015). The deploy workflow runs it only for `main`'s tip with green CI
-on that commit (ADR-0018). Order matters, because of what can fail between
+on that commit, from a push or a CI run started by hand on `main`
+(ADR-0018, ADR-0025). Order matters, because of what can fail between
 the two steps.
 
 **Schema changes are expand, then contract.** A migration lands while the
@@ -323,8 +324,9 @@ green CI?" fails with an `::error::` saying why:
 - **CI still `in_progress` or `queued`:** wait for it, then run the deploy
   workflow again by hand on `main`.
 - **CI failed or was cancelled, or there is no CI run on main** for the
-  commit: fix CI. A commit pushed while Actions was disabled never got a
-  run; push again or re-run CI.
+  commit: fix CI. A commit pushed while Actions was disabled, or brought in
+  by a fork sync that started nothing, never got a run: run the `ci`
+  workflow by hand on `main` (ADR-0025); a green run starts the deploy.
 - **GitHub API unavailable:** the gate fails closed; run it again later.
 - **A ref other than `main`:** only `main` deploys.
 
