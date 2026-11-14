@@ -1,6 +1,7 @@
 # ADR-0025: A CI run started by hand on main counts for the deploy gate
 
-**Status:** proposed, 2026-11-14. Would amend ADR-0018 (which CI runs count).
+**Status:** accepted, 2026-11-14 (pull request #34). Amends ADR-0018 (which
+CI runs count).
 
 ## Context
 Someone who wants their own instance can fork this repository and deploy it
