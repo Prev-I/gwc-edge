@@ -14,7 +14,11 @@ permissions:
 concurrency:
   # Pull requests share a group per branch and cancel superseded runs. Pushes
   # get a group per commit: a shared group keeps only one pending run and would
-  # silently drop the commits queued in between.
+  # silently drop the commits queued in between. Manual runs share their
+  # commit's group too, so a pending manual run on main can be cancelled by a
+  # later one on another branch at the same commit. No deploy follows (the
+  # gate refuses one started by hand, ADR-0025); running ci again on main
+  # fixes it.
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
