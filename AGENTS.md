@@ -8,7 +8,7 @@ Instructions for all AI coding agents (Claude Code, Codex, OpenCode).
 (Free plan), storing state in Cloudflare D1. Shareaza 2.7.x is the
 compatibility oracle: where the written GWC spec and Shareaza's parser
 disagree, Shareaza wins, and the deviation is recorded in `docs/protocol.md`
-(written in phase 2) with a citation into Shareaza's `DiscoveryServices.cpp`.
+with a citation into Shareaza's `DiscoveryServices.cpp`.
 
 ```
 crates/gwc-core/    pure protocol logic, no `worker` dependency, >= 90% line coverage

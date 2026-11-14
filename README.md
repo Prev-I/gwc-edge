@@ -99,7 +99,8 @@ The committed `wrangler.jsonc` is never edited. The script renders
 
 ### 3. Zone settings
 
-Until the cron's first run, `/healthz` answers 503 with `"cron":"never_run"`.
+Until the cron's first run, `/healthz` answers 200 with `"cron":"pending"`, or
+503 with `"cron":"never_run"` once a get has been served from a live scan.
 After a first deploy that run can take longer than the 10-minute schedule
 suggests: 17 minutes on 2026-10-25 (`docs/field-test-plan.md`). The deploy
 script accepts that; the daily check does not.
@@ -183,7 +184,9 @@ A new cache has no hubs and no clients until others know about it.
 - **Other caches.** Submit this cache's URL to working caches with
   `?update=1&url=<canonical URL>&net=gnutella2&client=…`. Once their own
   verification has pinged this cache, they list it. `dkac`
-  (`http://dkac.trillinux.org/dkac/dkac.php`) is the one known to be alive.
+  (`http://dkac.trillinux.org/dkac/dkac.php`) is one that answers. The
+  production instance verified four caches in stage 1, and Beacon Cache II
+  and Skulls caches found it on their own in stage 4.
   [`docs/field-test-plan.md`](docs/field-test-plan.md) covers this step, and
   the stages before it:
   - seeding this cache from `dkac` with `scripts/seed.sh`;

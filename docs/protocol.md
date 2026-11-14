@@ -39,7 +39,8 @@ file.
   last release of the original project and the one most hubs run. Both
   differences come from the ansani/Shareaza line, commit `64541b5d5` ("Soft
   name change", 2017-10-03). They ship in its releases from 2.7.10.3-beta.2 to
-  2.7.10.6, and so in the Prev-I fork's 2.7.10.6 builds:
+  2.7.10.6, and so in the Prev-I fork's builds (2.7.10.6, and 2.7.11.x from
+  `previ.5`):
   - It reports vendor `RAZI` (`Shareaza.h:444`), so its G2 gets carry
     `client=RAZI2.7.10.6`; 2.7.10.2 reports `RAZA`.
   - Its User-Agent is `iShareaza <version>` (`Shareaza.cpp:1109-1111`), where
@@ -401,9 +402,10 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
 - **`support=1`** adds `i|support|gnutella2` after the pong, on any network
   (ADR-0024). Sharelin bans a cache whose reply lacks it; Shareaza never asks.
   A query carrying only `support` gets that line alone. It comes on top of
-  every get reply described here, rate-limited and other-network ones included:
-  where this document says "only the self line" or "the pong plus the self
-  line", read "plus the support line when asked". Updates never carry it.
+  every get reply to an allowed client described here, rate-limited and
+  other-network ones included: where this document says "only the self line"
+  or "the pong plus the self line", read "plus the support line when asked".
+  Updates never carry it.
 - **A ping without a get** gets the pong on any network, so no allowed client
   ever receives an empty body. Shareaza never sends one: its G1 queries carry
   no ping, and its G2 pings always come with a get.
@@ -412,6 +414,9 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
 - **Rate-limited gets:** answered as above with no hosts and no caches, and no
   D1 read. That means the pong if it was asked for, the support line if it was
   asked for, plus the self line.
+- **What is limited:** only Gnutella2 hostfile gets, urlfile gets and updates,
+  the requests that can cost a D1 read or write. A lone ping, a lone `support`
+  query and any other network are never limited.
 - **Rate-limit keys:** the source address and the request type (hostfile,
   urlfile or update), with IPv6 grouped by /64. Shareaza's back-to-back hostfile
   and urlfile requests therefore never limit each other.
@@ -573,9 +578,9 @@ by part (`gwc_core::update`, ADR-0010):
   queueing it for a check, only once its backoff has passed and only if it is
   not already queued. Only the cron lists a hub, and only a successful
   handshake resets a hub's failures (ADR-0012).
-- Rate limits: 2 gets per 60 s per source and kind (hostfile and urlfile
-  separately), 1 update per 60 s per source; over the limit the reply is the
-  same, without data or storage.
+- Rate limits, Gnutella2 only: 2 gets per 60 s per source and kind (hostfile
+  and urlfile separately), 1 update per 60 s per source; over the limit the
+  reply is the same, without data or storage.
 
 ## Conformance to the published specifications
 
