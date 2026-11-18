@@ -24,9 +24,9 @@ invocation next to the request log line) showed where the time goes:
   about 110 ms on the dashboard), yet no run was cut short: every snapshot was
   rendered on time and no invocation ended `exceededCpu`.
 
-Locally (Node's V8), compiling the 834 KB module cost about 4 to 6 ms of CPU
-(an earlier, single run showed 10 to 13 ms), and instantiating it about 1 ms
-more: about a third of the fresh-isolate cost. The rest (the JavaScript glue,
+Locally (Node's V8), compiling the 853,858-byte module cost about 4 to 6 ms
+of CPU (an earlier, single run showed 10 to 13 ms), and instantiating it
+about 1 ms more: about a third of the fresh-isolate cost. The rest (the JavaScript glue,
 first calls into the module, the runtime) cannot be measured outside
 Cloudflare.
 
@@ -40,18 +40,20 @@ and logs show. The cron, consistently over 10 ms and never terminated,
 suggests the enforced quantity is not the one shown, or that the tolerance
 is wide; neither is documented.
 
-The module was 853,858 bytes, 519 KB of it code: `js_sys` 31 %, `core` 18 %,
-`gwc_worker` 12 %, `url` with `idna` and its Unicode tables about 10 %,
-`serde_json` 5 %, `worker` 4 %, `gwc_core` 3.5 %. `url` came in only through
-`req.url()`.
+The module was 853,858 bytes, 519,211 of them function code: `js_sys` 31 %,
+`core` 18 %, `gwc_worker` 12 %, `url` with `idna` and `icu_normalizer` about
+10 % (about 49 KiB), `serde_json` 5 %, `worker` 4 %, `gwc_core` 3.5 %. The
+rest of the file is data (among it the Unicode tables) and names. `url` came
+in only through `req.url()`.
 
 ## Decision
 - **The request URL is split, not parsed.** `gwc_core::request_url::split`
   reads the scheme, host, path and query from the runtime's serialised
   `Request.url`, and a test checks it against `url::Url` (a dev-dependency,
   never in the Worker). `url`, `idna` and the Unicode tables leave the module:
-  853,858 to 667,062 bytes, code 519 to 449 KB, about 12 % less local compile
-  time.
+  853,858 to 667,062 bytes (−22 %); function code 519,211 to 449,242 bytes
+  (−13.5 %), the rest of the 186,796 bytes being data and names. Local
+  compile time fell from a median of 5.7 to 4.3 ms over 8 noisy runs each.
 - **The module has a byte budget**, 720,000, checked in CI after the build
   (`scripts/wasm-size.sh`). Raising it is a deliberate change, made in the
   pull request that needs it, with the reason.
@@ -66,8 +68,10 @@ The module was 853,858 bytes, 519 KB of it code: `js_sys` 31 %, `core` 18 %,
 
 ## Consequences
 - **The "10 ms CPU" budget in `AGENTS.md` now means the request's own work.**
-  Start-up is measured inside `cpuTime` and dominates it; it is reduced by
-  keeping the module small, not by the request path.
+  The tail shows a fresh isolate's start-up inside `cpuTime`, where it
+  dominates (inferred from cold and warm requests, not documented by
+  Cloudflare); it is reduced by keeping the module small, not by the request
+  path.
 - **New dependencies are weighed by their size in the module**, not only by
   what they do: the budget check makes growth visible in the pull request.
 - **To be measured after the deploy:** a production tail of about 40 minutes,

@@ -11,8 +11,8 @@ set -euo pipefail
 # 667,062 bytes at 0.5.0 without the url crate, plus about 8 % headroom.
 max_bytes=720000
 
-cd "$(dirname "$0")/.."
-wasm="${1:-crates/gwc-worker/build/index_bg.wasm}"
+# An argument is relative to the caller's directory; the default to the repo.
+wasm="${1:-$(dirname "$0")/../crates/gwc-worker/build/index_bg.wasm}"
 [ -f "$wasm" ] || { echo "wasm-size: $wasm not found: build first" >&2; exit 2; }
 size=$(wc -c < "$wasm" | tr -d ' ')
 if [ "$size" -gt "$max_bytes" ]; then

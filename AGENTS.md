@@ -104,9 +104,9 @@ every push to `main`, and when started by hand (ADR-0025).
   header of migration 0001 states the rules.
 - **Stay inside one invocation's budget:** 10 ms CPU, 50 D1 queries, 50 external
   subrequests, 6 simultaneous connections (TCP sockets included). The 10 ms is
-  for the request's own work: a fresh isolate's start-up is measured inside
-  `cpuTime` and dominates it, and is kept down by keeping the module small
-  (`scripts/wasm-size.sh`, ADR-0026). The cron
+  for the request's own work: a fresh isolate's start-up appears inside
+  `cpuTime` and to dominate it (ADR-0026, proposed); it is kept down by
+  keeping the module small (`scripts/wasm-size.sh`). The cron
   counts every socket, fetch and D1 statement against a ledger
   (`gwc_core::verify::Ledger`, ceiling 45); a new statement in the cron's
   path must be added to `cron::TAIL` or `store::*_STATEMENTS` (ADR-0012).

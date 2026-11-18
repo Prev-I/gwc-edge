@@ -147,14 +147,40 @@ mod tests {
             "http://localhost:8787/?get=1&hostfile=1",
             "http://[::1]:8787/healthz",
             "http://u:p@gwc.example.org:8080/a/b?c=d#e",
+            "http://gwc.example.org#f",
+            "http://gwc.example.org/?#f",
+            "http://gwc.example.org/a%3F%23b?c",
+            "http://gwc.example.org?u=/x",
+            "HTTP://GWC.Example.ORG:80/Healthz?A=B",
+            "http://bücher.example/?q=ü",
         ];
-        for u in urls {
+        for raw in urls {
+            // What the runtime hands the Worker: the serialised form.
+            let want = url::Url::parse(raw).unwrap();
+            let u = want.as_str();
             let r = split(u);
-            let want = url::Url::parse(u).unwrap();
             assert_eq!(r.scheme, want.scheme(), "{u}");
             assert_eq!(r.host, want.host_str().unwrap_or_default(), "{u}");
             assert_eq!(r.path, want.path(), "{u}");
             assert_eq!(r.query, want.query(), "{u}");
+        }
+    }
+
+    proptest::proptest! {
+        /// Any URL the `url` crate can serialise splits into its parts.
+        #[test]
+        fn any_serialised_url_matches_the_url_crate(
+            raw in "(?i:https?)://([a-z0-9.-]{1,20}|\\[[0-9a-f:]{2,12}\\])(:[0-9]{1,5})?(/[ -~]{0,30})?(\\?[ -~]{0,30})?(#[ -~]{0,10})?"
+        ) {
+            if let Ok(want) = url::Url::parse(&raw)
+                && let Some(host) = want.host_str()
+            {
+                let r = split(want.as_str());
+                proptest::prop_assert_eq!(r.scheme, want.scheme());
+                proptest::prop_assert_eq!(r.host, host);
+                proptest::prop_assert_eq!(r.path, want.path());
+                proptest::prop_assert_eq!(r.query, want.query());
+            }
         }
     }
 }
