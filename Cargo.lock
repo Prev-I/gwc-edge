@@ -273,6 +273,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]

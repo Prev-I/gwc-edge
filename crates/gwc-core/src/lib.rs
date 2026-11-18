@@ -19,6 +19,7 @@ pub mod log;
 pub mod ping;
 pub mod policy;
 pub mod query;
+pub mod request_url;
 pub mod response;
 pub mod route;
 pub mod seed;
