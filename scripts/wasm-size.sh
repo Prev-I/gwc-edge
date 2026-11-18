@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Fail if the built Worker module is larger than its budget (ADR-0026).
-# Every fresh isolate compiles the whole module, and with sparse traffic
-# nearly every request starts one, so the module's size is paid in CPU time
-# by almost every request. Raise the budget only on purpose, in the same
-# pull request as the growth, saying why.
+# Fail if the built Worker module is larger than its budget (ADR-0026), so
+# that it never grows unnoticed. (A 22 % smaller module did not measurably
+# lower production CPU, but size still counts against the plan's limit and
+# is easier kept than won back.) Raise the budget only on purpose, in the
+# same pull request as the growth, saying why.
 #
 # Usage: scripts/wasm-size.sh [path/to/index_bg.wasm]   (after a build)
 set -euo pipefail

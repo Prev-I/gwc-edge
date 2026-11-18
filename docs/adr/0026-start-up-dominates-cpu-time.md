@@ -1,7 +1,7 @@
-# ADR-0026: Start-up dominates the Worker's CPU time; the module is kept small
+# ADR-0026: Start-up dominates the Worker's CPU time; a smaller module did not measurably lower it
 
-**Status:** proposed, 2026-11-18. To be accepted once a production tail after
-the deploy shows the effect. Qualifies the "10 ms CPU" budget in `AGENTS.md`.
+**Status:** accepted, 2026-11-18, after a production tail of the smaller
+module (pull request #39). Qualifies the "10 ms CPU" budget in `AGENTS.md`.
 
 ## Context
 Field test stage 5 (`docs/field-test-plan.md`) failed its CPU row. Over the
@@ -55,26 +55,44 @@ in only through `req.url()`.
   (−13.5 %), the rest of the 186,796 bytes being data and names. Local
   compile time fell from a median of 5.7 to 4.3 ms over 8 noisy runs each.
 - **The module has a byte budget**, 720,000, checked in CI after the build
-  (`scripts/wasm-size.sh`). Raising it is a deliberate change, made in the
-  pull request that needs it, with the reason.
+  (`scripts/wasm-size.sh`), so that it does not grow unnoticed. Raising it is
+  a deliberate change, made in the pull request that needs it, with the
+  reason.
+- **No further size work for CPU's sake.** Measured in production, the
+  smaller module had no measurable effect on the cost (see Consequences).
 - **`opt-level` stays `"s"`.** `"z"` cut the code by 12 % but did not change
   the measured compile time.
 - **No rewrite now.** Getting every request under 10 ms for certain would take
   a different architecture (for example a JavaScript Worker for the hot path).
   With no `exceededCpu` and no errors in production, that is not justified
   today.
-- **`cpuTime` stays under watch:** an `exceededCpu` outcome, error 1102, or a
-  rise in errors reopens this decision.
 
 ## Consequences
-- **The "10 ms CPU" budget in `AGENTS.md` now means the request's own work.**
-  The tail shows a fresh isolate's start-up inside `cpuTime`, where it
-  dominates (inferred from cold and warm requests, not documented by
-  Cloudflare); it is reduced by keeping the module small, not by the request
-  path.
-- **New dependencies are weighed by their size in the module**, not only by
-  what they do: the budget check makes growth visible in the pull request.
-- **To be measured after the deploy:** a production tail of about 40 minutes,
-  compared with the one above. This record is accepted with those figures.
+- **The smaller module did not measurably lower production CPU.** A second 40-minute
+  tail after the deploy (46 invocations, one version) measured requests at
+  14, 16, 28 and 35 ms at P25, P50, P75 and P90, against 14, 17, 26 and 30 ms
+  before (nearest-rank percentiles); gets from the stored snapshot at 16 ms
+  (P50) and 32 ms (P90), against 17 and 30 ms; 6 of 42 requests at 10 ms or less, against 8 of 50;
+  again 1 `memo` hit. The differences are within the noise of samples this
+  size, so any saving from the smaller module is too small to see here.
+  Together with the local measurement (compiling and instantiating about a
+  third of a fresh isolate's cost), this suggests compilation is not the
+  main part of the cost on Cloudflare. Possible reasons, none measurable
+  from outside: compiled code may be reused across isolates, or the cost may
+  lie in the JavaScript glue, the first calls into the module, or the
+  runtime. One request ended `canceled` (the client most likely
+  disconnected; wall 1.8 s), none `exceededCpu`.
+- **The "10 ms CPU" budget in `AGENTS.md` means the request's own work.** The
+  tails show a fresh isolate's start-up inside `cpuTime`, where it dominates
+  (inferred from cold and warm requests, not documented by Cloudflare). It is
+  not reduced by the request path, nor, measurably, by a smaller module.
+- **The split URL and the byte budget stay.** They cost little, change no
+  behaviour (a test checks the split against `url::Url`), and keep the module well inside the plan's size limit; the
+  budget's purpose is that growth is seen and argued in the pull request, not
+  a CPU saving.
 - **What is not known:** how Cloudflare counts and enforces start-up CPU on
-  the Free plan. Only Cloudflare can say; a question to them is still open.
+  the Free plan. Only Cloudflare can say; that question is still open.
+- **What would reopen this:** an `exceededCpu` outcome, error 1102, or a rise
+  in errors. The way out then is an architecture that does not pay a wasm
+  isolate's start-up on the hot path (for example a JavaScript Worker for
+  gets), a decision of its own.

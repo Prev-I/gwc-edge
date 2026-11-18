@@ -83,7 +83,7 @@ impl Done {
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let now = now();
     // Split, not parsed with `url`: that would link idna and its Unicode
-    // tables, and every isolate's start-up pays for the module (ADR-0026).
+    // tables into the module, which keeps a byte budget (ADR-0026).
     let raw_url = req.inner().url();
     let url = request_url::split(&raw_url);
     let https = url.scheme == "https";

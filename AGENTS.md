@@ -25,7 +25,7 @@ docs/field-test-plan.md  how to prove the deployed cache with real Shareaza clie
 scripts/smoke.sh    wrangler dev + local D1 + /healthz and --prod checks (also run in CI);
                     `--prod <url>` checks a deployed cache as Shareaza sees it
 scripts/deploy.sh   render wrangler.deploy.json, migrate, deploy, smoke --prod (ADR-0015)
-scripts/wasm-size.sh the built module's size budget (ADR-0026), run in CI after the build
+scripts/wasm-size.sh the built module's byte budget (ADR-0026), run in CI after the build
 scripts/ci-gate.mjs the deploy workflow's gate: main's tip with green CI on that commit (ADR-0018, 0025)
 scripts/fuzz.sh     cargo fuzz on the dated nightly; fuzz/ is its own workspace
 scripts/seed.sh     one-shot seeding from another cache (dkac) via the gwc_seed tool
@@ -105,8 +105,9 @@ every push to `main`, and when started by hand (ADR-0025).
 - **Stay inside one invocation's budget:** 10 ms CPU, 50 D1 queries, 50 external
   subrequests, 6 simultaneous connections (TCP sockets included). The 10 ms is
   for the request's own work: a fresh isolate's start-up appears inside
-  `cpuTime` and to dominate it (ADR-0026, proposed); it is kept down by
-  keeping the module small (`scripts/wasm-size.sh`). The cron
+  `cpuTime` and to dominate it, and a smaller module did not measurably
+  lower it (ADR-0026). Keep the module within its byte budget
+  (`scripts/wasm-size.sh`) all the same. The cron
   counts every socket, fetch and D1 statement against a ledger
   (`gwc_core::verify::Ledger`, ceiling 45); a new statement in the cron's
   path must be added to `cron::TAIL` or `store::*_STATEMENTS` (ADR-0012).
