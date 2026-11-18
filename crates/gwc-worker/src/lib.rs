@@ -14,6 +14,7 @@ use gwc_core::config::Config;
 use gwc_core::counters::{self, Key, Kind, SAMPLE_K};
 use gwc_core::health::Flush;
 use gwc_core::log::{Outcome, RequestLine, route_kind};
+use gwc_core::request_url::{self, RequestUrl};
 use gwc_core::route::{self, Route};
 use worker::{
     Context, Env, Headers, Method, Request, Response, Result, ScheduleContext, ScheduledEvent,
@@ -81,8 +82,11 @@ impl Done {
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let now = now();
-    let url = req.url()?;
-    let https = url.scheme() == "https";
+    // Split, not parsed with `url`: that would link idna and its Unicode
+    // tables, and every isolate's start-up pays for the module (ADR-0026).
+    let raw_url = req.inner().url();
+    let url = request_url::split(&raw_url);
+    let https = url.scheme == "https";
     let method = match req.method() {
         Method::Get => route::Method::Get,
         Method::Head => route::Method::Head,
@@ -91,7 +95,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let host = req
         .headers()
         .get("Host")?
-        .unwrap_or_else(|| url.host_str().unwrap_or_default().to_owned());
+        .unwrap_or_else(|| url.host.to_owned());
     let colo = req.cf().map_or_else(|| "-".to_owned(), worker::Cf::colo);
     // Set by Cloudflare at the edge; used for the source check and rate keys,
     // never logged.
@@ -103,8 +107,8 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
             let route = route::classify(
                 method,
                 &host,
-                url.path(),
-                url.query().unwrap_or(""),
+                url.path,
+                url.query.unwrap_or(""),
                 &config.canonical_url,
             );
             // A handler error still gets a response and its one log line.
@@ -115,7 +119,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
         Err(e) => {
             // Every route but /healthz is refused: there is no URL to list.
-            let resp = if url.path() == "/healthz" {
+            let resp = if url.path == "/healthz" {
                 match pages::healthz(Err(&e), &env, now, &mut probe).await {
                     Ok((resp, _)) => resp,
                     Err(err) => internal_error(&err)?.resp,
@@ -133,7 +137,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     route: Route,
-    url: &worker::Url,
+    url: &RequestUrl<'_>,
     source: &str,
     https: bool,
     now: u64,
@@ -144,7 +148,7 @@ async fn dispatch(
     Ok(match route {
         Route::Gwc => {
             let a = gwc::handle(
-                url.query().unwrap_or(""),
+                url.query.unwrap_or(""),
                 source,
                 https,
                 now,
