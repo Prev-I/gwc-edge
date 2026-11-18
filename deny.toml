@@ -7,7 +7,13 @@ all-features = false
 
 [advisories]
 # Every RustSec advisory fails the check unless it is listed here with a reason.
-ignore = []
+ignore = [
+  # chrono is unmaintained (an informational advisory: no vulnerability is
+  # reported). We do not use chrono; it comes only through the Workers SDK,
+  # `worker` 0.8.7, and `worker` 0.9.0 still depends on it (checked
+  # 2026-11-18). Remove this entry once `worker` no longer pulls chrono in.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vulnerability reported; only through worker 0.8.7, and worker 0.9.0 still depends on it" },
+]
 
 [licenses]
 # Permissive licences compatible with shipping this repository under MIT. Only
