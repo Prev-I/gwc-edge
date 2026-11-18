@@ -2,8 +2,8 @@
 //!
 //! The runtime hands the Worker an already serialised absolute URL
 //! (`Request.url`), so splitting it is enough; parsing it again with `url`
-//! would link `idna` and its Unicode tables into the wasm and lengthen every
-//! isolate's start-up (ADR-0026). The result matches `url::Url`'s `scheme()`,
+//! would link `idna` and its Unicode tables into the wasm, against the
+//! module's byte budget (ADR-0026). The result matches `url::Url`'s `scheme()`,
 //! `host_str()`, `path()` and `query()` for such URLs; the tests check it.
 
 /// The routing parts of a serialised absolute URL.
