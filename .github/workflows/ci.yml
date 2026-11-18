@@ -99,6 +99,8 @@ jobs:
         run: node --test 'scripts/*.test.mjs'
       - name: build (render the deploy config and bundle, as a deploy would)
         run: GWC_CANONICAL_URL=http://gwc.example.org/ scripts/deploy.sh --dry-run
+      - name: wasm size within budget (ADR-0026)
+        run: scripts/wasm-size.sh
       - name: smoke test (/healthz with local D1)
         run: scripts/smoke.sh
       - name: integration tests (Shareaza-shaped client against wrangler dev)
