@@ -116,9 +116,10 @@ of the last 24 h, the rest counted in `other_clients`. Each count is an
 estimate: one sampled request shows as 8, and a client that sent only a few
 requests may be missing on a given day.
 
-The codes below were seen in production from 2026-11-09 to 2026-11-13. The
-request log line never carries the User-Agent; `wrangler tail --format json`
-shows it, under `event.request.headers`. Tail output also carries the
+The codes below were seen in production from 2026-11-09 to 2026-11-13,
+unless a row gives a later date. The request log line never carries the
+User-Agent; `wrangler tail --format json` shows it, under
+`event.request.headers`. Tail output also carries the
 requester's address and location (`cf-connecting-ip`, the `cf` object): never
 paste it into an issue, a pull request or a document.
 
@@ -135,6 +136,7 @@ paste it into an issue, a pull request or a document.
 | `DOXU 1.2` | (not in a tail) | Probably g2paranha, the G2 crawler behind crawler.doxu.org. |
 | `TEST BCII` | `Beacon Cache II 0.8.0.1 (BCII)` | A Beacon Cache II web cache verifying this one: a ping plus a hostfile get. |
 | `SKLL 0.3.6` | `Skulls 0.3.6-<suffix>` | A Skulls web cache verifying this one: a ping. |
+| `GCII 8.2.18.10` | `G1G2WebCache/8.2.18` | G1-G2 WebCache V8.2.18.10, a closed-source PHP web cache serving Gnutella, Gnutella2 and Foxy, verifying this one. It pings with `ping=1&net=gnutella-gnutella2&v3=1` while it handles an update that submits this cache's URL, before it replies. First sampled on 2026-11-20. |
 | `GWCE smoke` | `Shareaza 2.7.10.6` | `scripts/smoke.sh --prod`, run by the deploy workflow and the daily `prod-smoke` workflow; the script's header says why it uses its own code. |
 
 "(not in a tail)" means the code was seen only in the sampled counters.
