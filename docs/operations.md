@@ -136,7 +136,7 @@ paste it into an issue, a pull request or a document.
 | `DOXU 1.2` | (not in a tail) | Probably g2paranha, the G2 crawler behind crawler.doxu.org. |
 | `TEST BCII` | `Beacon Cache II 0.8.0.1 (BCII)` | A Beacon Cache II web cache verifying this one: a ping plus a hostfile get. |
 | `SKLL 0.3.6` | `Skulls 0.3.6-<suffix>` | A Skulls web cache verifying this one: a ping. |
-| `GCII 8.2.18.10` | `G1G2WebCache/8.2.18` | G1-G2 WebCache V8.2.18.10, a closed-source PHP web cache serving Gnutella, Gnutella2 and Foxy, verifying this one. It pings with `ping=1&net=gnutella-gnutella2&v3=1` while it handles an update that submits this cache's URL, before it replies. First sampled on 2026-11-20. |
+| `GCII 8.2.18.10` | `G1G2WebCache/8.2.18` | G1-G2 WebCache V8.2.18.10, a closed-source PHP web cache serving Gnutella, Gnutella2 and Foxy, verifying this one. It pings with `ping=1&net=gnutella-gnutella2&v3=1` while it handles an update that submits this cache's URL, before it replies. First sampled on 2026-11-17. |
 | `GWCE smoke` | `Shareaza 2.7.10.6` | `scripts/smoke.sh --prod`, run by the deploy workflow and the daily `prod-smoke` workflow; the script's header says why it uses its own code. |
 
 "(not in a tail)" means the code was seen only in the sampled counters.
