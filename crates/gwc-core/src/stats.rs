@@ -149,6 +149,18 @@ pub struct CronRun {
     pub subrequests: u64,
     /// `TEST_DIAL` was set: an integration-test build, never production.
     pub test_dial: bool,
+    /// The effective `ADVERTISE` mode, `on` or `off` (ADR-0021).
+    pub advertise: String,
+    /// Advertisements sent (at most one a run), and how each reply was
+    /// classified.
+    pub caches_advertised: u64,
+    pub adverts_ok: u64,
+    pub adverts_warned: u64,
+    pub adverts_failed: u64,
+    /// A cache qualified, but the ledger or the connection slots had no room
+    /// for its advertisement, or its stamp failed. Apart from
+    /// `skipped_budget`.
+    pub advert_skipped: u64,
 }
 
 /// The per-run part, `snapshots.cron`.

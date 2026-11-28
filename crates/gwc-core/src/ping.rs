@@ -82,9 +82,16 @@ fn socket_request_with(url: &str, query: &str) -> (String, u16, String) {
 /// `TEST_DIAL`, which aims a fetched ping at a loopback test peer.
 #[must_use]
 pub fn fetch_url_at(url: &str, at: std::net::SocketAddrV4) -> String {
+    fetch_at(&format!("{url}?{}", query()), at)
+}
+
+/// A fetch URL (path and query kept) with its host and port replaced by
+/// `at`: for `TEST_DIAL`, as [`fetch_url_at`], for any request.
+#[must_use]
+pub fn fetch_at(url: &str, at: std::net::SocketAddrV4) -> String {
     let rest = url.strip_prefix("http://").unwrap_or(url);
-    let path = rest.split_once('/').map_or("", |(_, p)| p);
-    format!("http://{at}/{path}?{}", query())
+    let tail = rest.find(['/', '?']).map_or("", |i| &rest[i..]);
+    format!("http://{at}/{}", tail.strip_prefix('/').unwrap_or(tail))
 }
 
 /// Status and body of a complete HTTP/1.x response, if `bytes` holds its
@@ -644,6 +651,23 @@ mod tests {
         assert!(
             fetch_url_at("http://cache.example.org", "127.0.0.1:1".parse().unwrap())
                 .starts_with("http://127.0.0.1:1/?ping=1")
+        );
+    }
+
+    #[test]
+    fn any_fetch_url_can_be_aimed_at_a_test_peer() {
+        let at = "127.0.0.1:18810".parse().unwrap();
+        assert_eq!(
+            fetch_at("http://cache.example.org/gwc/?update=1&url=x", at),
+            "http://127.0.0.1:18810/gwc/?update=1&url=x"
+        );
+        assert_eq!(
+            fetch_at("http://cache.example.org?update=1", at),
+            "http://127.0.0.1:18810/?update=1"
+        );
+        assert_eq!(
+            fetch_at("http://cache.example.org", at),
+            "http://127.0.0.1:18810/"
         );
     }
 
