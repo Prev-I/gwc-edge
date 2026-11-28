@@ -204,7 +204,9 @@ pub struct Reader {
     examined: usize,
     /// The urlfile scan, if this ping also looks for this cache.
     scan: Option<UrlScan>,
-    /// Whether the body has reached its `Content-Length`.
+    /// Whether the body has reached its `Content-Length`, which delimits it
+    /// (no `Transfer-Encoding`), with nothing after it but a line end: the
+    /// body is whole, and its last line complete.
     reached: bool,
     /// Whether the last line, with no line end, went to the scan.
     tail_scanned: bool,
@@ -273,13 +275,17 @@ impl Reader {
 
     /// Whether reading can stop. Without a scan, once there is a verdict.
     /// With one, once the verdict is no pong, or a pong that is excluded
-    /// from advertisement (Skulls) or whose urlfile listed this cache.
+    /// from advertisement (Skulls), whose urlfile listed this cache, or
+    /// whose body has reached its `Content-Length` (reading on can change
+    /// nothing).
     #[must_use]
     pub fn settled(&self) -> bool {
         match (&self.verdict, &self.scan) {
             (None, _) => false,
             (Some(Verdict::NoPong), _) | (Some(Verdict::Pong(_)), None) => true,
-            (Some(Verdict::Pong(name)), Some(scan)) => scan.listed() || advert::excluded(name),
+            (Some(Verdict::Pong(name)), Some(scan)) => {
+                self.reached || scan.listed() || advert::excluded(name)
+            }
         }
     }
 
@@ -291,9 +297,10 @@ impl Reader {
 
     /// Whether the pinged cache lists this one, once the read ended by
     /// `end`. Absence needs the body read whole: `fetch()`'s stream ended,
-    /// or the peer closed with the `Content-Length` reached, or with neither
-    /// `Content-Length` nor `Transfer-Encoding`. Always unknown without a
-    /// scan, without a pong, or for an excluded pong.
+    /// or its `Content-Length` was reached however the read ended, or the
+    /// peer closed with neither `Content-Length` nor `Transfer-Encoding`.
+    /// Always unknown without a scan, without a pong, or for an excluded
+    /// pong.
     #[must_use]
     pub fn listing(&self, end: End) -> Listing {
         let Some(scan) = &self.scan else {
@@ -314,14 +321,12 @@ impl Reader {
     }
 
     fn whole(&self, end: End) -> bool {
-        match end {
-            End::StreamEnd => true,
-            End::Closed => self.body.is_some_and(|b| match b.length {
-                Some(_) => self.reached,
-                None => !b.chunked,
-            }),
-            End::Cut | End::Deadline => false,
-        }
+        self.reached
+            || match end {
+                End::StreamEnd => true,
+                End::Closed => self.body.is_some_and(|b| b.length.is_none() && !b.chunked),
+                End::Cut | End::Deadline => false,
+            }
     }
 
     /// The verdict, once the bytes so far settle it; `None` while more bytes
@@ -348,7 +353,10 @@ impl Reader {
             };
             Some(&bytes[self.line_start.min(end)..end])
         });
+        // With a length, `advance` has handed the last line over already,
+        // if the length did not cut it short.
         if let Some(line) = last
+            && self.body.is_some_and(|b| b.length.is_none())
             && !self.settled()
         {
             self.scan_tail(line);
@@ -454,11 +462,17 @@ impl Reader {
         if bytes.len() < end {
             return;
         }
-        self.reached = true;
-        // The last line, cut by the length: whole for the scan, since the
-        // body ends there.
         let last = &bytes[self.line_start.min(end)..end];
-        self.scan_tail(last);
+        // The body ends at the length, unless `Transfer-Encoding` overrides
+        // it, or the length cuts the last line short (anything but a line
+        // end follows a non-empty last line). Bytes past a length that ends
+        // on a line boundary cut nothing. A settled reader reads no further,
+        // so what arrives after the length is first reached cannot undo it.
+        let cut = !last.is_empty() && bytes.get(end).is_some_and(|b| !matches!(b, b'\r' | b'\n'));
+        if !self.reached && !body.chunked && !cut {
+            self.reached = true;
+            self.scan_tail(last);
+        }
         if self.verdict.is_some() {
             return;
         }
@@ -988,10 +1002,10 @@ mod tests {
         assert_eq!(kept.listing(End::Deadline), Listing::Listed);
         // Nothing past the length is scanned.
         let past = format!("{}{body}{ME}", head(body.len()));
-        let mut cut = scanning();
-        cut.feed(past.as_bytes());
-        assert!(!cut.settled());
-        assert_eq!(cut.listing(End::Closed), Listing::Absent);
+        let mut beyond = scanning();
+        beyond.feed(past.as_bytes());
+        assert!(beyond.settled(), "the length was reached");
+        assert_eq!(beyond.listing(End::Closed), Listing::Absent);
     }
 
     #[test]
@@ -1051,5 +1065,62 @@ mod tests {
         }
         assert!(!r.settled());
         assert!(r.examined() <= 4 * lines.len(), "{}", r.examined());
+    }
+
+    fn sized(body: &str, n: usize) -> String {
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {n}\r\n\r\n{body}")
+    }
+
+    #[test]
+    fn a_reached_length_is_whole_even_at_the_deadline() {
+        let body = format!("i|pong|Kept|gnutella2\r\n{THIRD}");
+        let reply = sized(&body, body.len());
+        let mut r = scanning();
+        r.feed(&reply.as_bytes()[..reply.len() - 1]);
+        assert!(!r.settled());
+        r.feed(reply.as_bytes());
+        assert!(r.settled(), "reading on can change nothing");
+        assert_eq!(r.listing(End::Deadline), Listing::Absent);
+        assert_eq!(r.listing(End::Cut), Listing::Absent);
+        assert_eq!(r.listing(End::Closed), Listing::Absent);
+        // The last line ends at the length, with no line end.
+        let open = "i|pong|Kept|gnutella2\r\nu|http://third.example.net/";
+        let mut t = scanning();
+        t.feed(sized(open, open.len()).as_bytes());
+        assert!(t.settled());
+        assert_eq!(t.listing(End::Deadline), Listing::Absent);
+    }
+
+    #[test]
+    fn a_length_that_cuts_a_line_is_not_whole() {
+        let body = format!("i|pong|Cut|gnutella2\r\n{ME}");
+        let n = body.find(".org").unwrap();
+        let reply = sized(&body, n);
+        for closed in [false, true] {
+            let mut r = scanning();
+            if closed {
+                assert_eq!(r.close(reply.as_bytes()), Some("Cut".into()));
+            } else {
+                r.feed(reply.as_bytes());
+            }
+            for end in [End::Closed, End::Deadline, End::Cut] {
+                assert_eq!(r.listing(end), Listing::Unknown, "{closed} {end:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_encoding_beats_content_length() {
+        let body = format!("i|pong|Both|gnutella2\r\n{THIRD}");
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nTransfer-Encoding: chunked\r\n\r\n{body}",
+            body.len()
+        );
+        let mut r = scanning();
+        r.feed(reply.as_bytes());
+        assert!(!r.settled(), "the length does not delimit the body");
+        r.close(reply.as_bytes());
+        assert_eq!(r.listing(End::Closed), Listing::Unknown);
+        assert_eq!(r.listing(End::Deadline), Listing::Unknown);
     }
 }
