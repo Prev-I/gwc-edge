@@ -260,10 +260,11 @@ fn get_request(url: &str) -> Option<Request> {
 }
 
 /// Ping a cache with `fetch()`. Redirects are not followed, as over a socket.
-/// Reads at most [`PING_BODY_MAX`] bytes of the body and stops as soon as the
-/// reply is settled (`ping::Reader::settled`; see [`ping_socket`]). The
-/// runtime delimits the body itself, so `Content-Length` is not used: it may
-/// count the compressed bytes of a body the runtime has already decoded.
+/// Stops reading once the body is past [`PING_BODY_MAX`] bytes (so at most
+/// one chunk more), or as soon as the reply is settled
+/// (`ping::Reader::settled`; see [`ping_socket`]). The runtime delimits the
+/// body itself, so `Content-Length` is not used: it may count the compressed
+/// bytes of a body the runtime has already decoded.
 ///
 /// The reader and the body live outside the deadline, so a deadline after
 /// the pong line still yields that pong, and the scan so far.
@@ -323,82 +324,70 @@ pub async fn ping_fetch(url: &str, scan: Option<UrlScan>) -> PingResult {
     }
 }
 
-/// Whether the body of an advertisement reply, so far, already decides its
-/// class: [`advert::BODY_MAX`] bytes have arrived, or a complete line within
-/// them contains `OK`. That line is the first to contain it (an earlier
-/// line would have decided already), and being complete it cannot gain a
-/// `WARNING` later, so reading on cannot change [`advert::classify`].
-fn advert_decided(body: &[u8]) -> bool {
-    if body.len() >= advert::BODY_MAX {
-        return true;
-    }
-    let complete = body
-        .iter()
-        .rposition(|&b| b == b'\r' || b == b'\n')
-        .map_or(&[][..], |i| &body[..=i]);
-    advert::classify(Some(200), complete) != Class::Failed
-}
-
-/// The class of a whole reply, or what arrived of it: the first
-/// [`advert::BODY_MAX`] body bytes of a 200 reply are classified.
-fn advert_class(status: u16, body: &[u8]) -> Class {
-    advert::classify(Some(status), &body[..body.len().min(advert::BODY_MAX)])
-}
-
 /// Advertise this cache over a socket: `request` is the plain HTTP/1.0 GET
 /// for the update. Reads at most [`advert::READ_MAX`] bytes in total, headers
-/// included (`talk` may overshoot by one chunk; the excess is ignored), and
-/// stops once the status is not 200 or the body decides the class
-/// ([`advert_decided`]). A timeout, or a failed connection, is `Failed`.
+/// included (`talk` may read one chunk more; the excess is not looked at),
+/// and stops once the reply's class is decided ([`advert::ReplyWatch`]). A
+/// timeout, a failed connection or a cut reply is `Failed` unless already
+/// decided.
 #[expect(dead_code, reason = "the cron advertises from Task 6 of ADR-0021")]
 pub async fn advertise_socket(host: &str, port: u16, request: &str) -> (Class, Leak) {
+    let mut watch = advert::ReplyWatch::socket();
     let (bytes, leak) = talk(
         host,
         port,
         request.as_bytes(),
         advert::READ_MAX,
         advert::TIMEOUT_MS,
-        // Re-parses the header block on each read: at most READ_MAX bytes,
-        // a few reads.
         |b: &[u8]| {
-            ping::http_reply(b).is_some_and(|(status, body)| status != 200 || advert_decided(body))
+            watch.feed(b);
+            watch.decided()
         },
     )
     .await;
-    let class = match bytes {
-        Ok(bytes) => {
-            let bytes = &bytes[..bytes.len().min(advert::READ_MAX)];
-            ping::http_reply(bytes)
-                .map_or(Class::Failed, |(status, body)| advert_class(status, body))
+    if let Ok(bytes) = bytes {
+        if bytes.len() > advert::READ_MAX {
+            // Cut at the limit: `done` never saw the last chunk.
+            watch.feed(&bytes[..advert::READ_MAX]);
+        } else {
+            // The peer closed: whatever arrived is the whole reply.
+            watch.close(&bytes);
         }
-        Err(_) => Class::Failed,
-    };
-    (class, leak)
+    }
+    (watch.class(), leak)
 }
 
 /// Advertise this cache with `fetch()` to `url`, the update URL. No
-/// redirects, as for pings. Reads the body until it decides the class
-/// ([`advert_decided`]) or ends. A timeout, or a failed request or body
-/// stream, is `Failed`.
+/// redirects, as for pings. Reads the body until the reply's class is
+/// decided ([`advert::ReplyWatch`], at most [`advert::BODY_MAX`] bytes and
+/// one chunk) or the body ends. A timeout, or a failed request or body
+/// stream, is `Failed` unless already decided.
 #[expect(dead_code, reason = "the cron advertises from Task 6 of ADR-0021")]
 pub async fn advertise_fetch(url: &str) -> Class {
     within(advert::TIMEOUT_MS, async {
         let request = get_request(url)?;
         let mut response = Fetch::Request(request).send().await.ok()?;
-        let status = response.status_code();
-        if status != 200 {
-            return Some(Class::Failed);
+        let mut watch = advert::ReplyWatch::body(response.status_code());
+        if watch.decided() {
+            return Some(watch.class());
         }
         let mut stream = response.stream().ok()?;
         let mut body = Vec::new();
-        while !advert_decided(&body) {
+        loop {
+            watch.feed(&body);
+            if watch.decided() {
+                break;
+            }
             match stream.next().await {
                 Some(Ok(chunk)) => body.extend_from_slice(&chunk),
-                Some(Err(_)) => return None,
-                None => break,
+                Some(Err(_)) => break,
+                None => {
+                    watch.close(&body);
+                    break;
+                }
             }
         }
-        Some(advert_class(status, &body))
+        Some(watch.class())
     })
     .await
     .flatten()

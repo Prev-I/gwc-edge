@@ -99,7 +99,7 @@ pub fn http_reply(bytes: &[u8]) -> Option<(u16, &[u8])> {
 /// Index just past the header block (`\r\n\r\n` or `\n\n`, whichever comes
 /// first), searching from `from`, which may lag the buffer's end by up to 3
 /// bytes so a terminator split across reads is found.
-fn header_end(bytes: &[u8], from: usize) -> Option<usize> {
+pub(crate) fn header_end(bytes: &[u8], from: usize) -> Option<usize> {
     let crlf = bytes[from..]
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -117,7 +117,7 @@ fn header_end(bytes: &[u8], from: usize) -> Option<usize> {
 /// The status code and `Content-Length` of a header block, and whether it has
 /// a `Transfer-Encoding` header, or `None` if its first line is not an
 /// HTTP/1.x status line.
-fn status_and_length(head: &[u8]) -> Option<(u16, Option<usize>, bool)> {
+pub(crate) fn status_and_length(head: &[u8]) -> Option<(u16, Option<usize>, bool)> {
     let text = std::str::from_utf8(head).ok()?;
     let mut lines = text.lines();
     let code = lines.next()?.strip_prefix("HTTP/1.")?.get(2..5)?;

@@ -150,6 +150,172 @@ pub fn classify(status: Option<u16>, body: &[u8]) -> Class {
     }
 }
 
+/// Watches an advertisement reply as it arrives, so the read can stop as
+/// soon as its [`Class`] is known. Feed it the whole buffer each time, as
+/// [`ping::Reader`]: cursors that only move forward keep the total work
+/// linear in the reply's length, however it is trickled (the cron has 10 ms
+/// of CPU).
+///
+/// The class is the one [`classify`] gives the first [`BODY_MAX`] body bytes
+/// of the complete reply. It is decided at once by a status line that is not
+/// HTTP/1.x or a status other than 200; otherwise by the first complete body
+/// line containing `OK`, or once the body reaches [`BODY_MAX`] bytes or its
+/// `Content-Length` (the last line then counts as complete), or by
+/// [`ReplyWatch::close`]. Undecided, it is `Failed`: a timeout or a cut read
+/// cannot vouch for the peer.
+#[derive(Debug, Clone, Default)]
+pub struct ReplyWatch {
+    /// Where the body starts, once the header block is found, and where
+    /// the classified part of it ends (`BODY_MAX`, or the `Content-Length`
+    /// if shorter), absolute.
+    body: Option<(usize, usize)>,
+    /// How far the header search has got.
+    searched: usize,
+    /// Whether the status line has been checked.
+    status_seen: bool,
+    /// Start of the first body line not yet taken, and how far the line-end
+    /// search has got (both absolute).
+    line_start: usize,
+    scanned: usize,
+    decided: Option<Class>,
+    /// Bytes looked at so far: the measure of the work done.
+    examined: usize,
+}
+
+/// The class a body line decides, if it contains `OK`.
+fn line_class(line: &[u8]) -> Option<Class> {
+    contains(line, b"OK").then(|| {
+        if contains(line, b"WARNING") {
+            Class::Warned
+        } else {
+            Class::Ok
+        }
+    })
+}
+
+impl ReplyWatch {
+    /// A watch for a raw HTTP/1.x reply, header block included (a socket).
+    #[must_use]
+    pub fn socket() -> ReplyWatch {
+        ReplyWatch::default()
+    }
+
+    /// A watch for a body alone, whose status is already known (`fetch()`,
+    /// which delimits the body itself).
+    #[must_use]
+    pub fn body(status: u16) -> ReplyWatch {
+        ReplyWatch {
+            body: Some((0, BODY_MAX)),
+            status_seen: true,
+            decided: (status != 200).then_some(Class::Failed),
+            ..ReplyWatch::default()
+        }
+    }
+
+    /// Read on from where the last call stopped.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        if self.decided.is_some() {
+            return;
+        }
+        let Some((start, cap)) = self.body.or_else(|| self.head(bytes)) else {
+            return;
+        };
+        if self.decided.is_some() {
+            return;
+        }
+        let end = bytes.len().min(cap);
+        let from = self.scanned.max(start);
+        self.examined += end.saturating_sub(from);
+        for i in from..end {
+            if bytes[i] == b'\r' || bytes[i] == b'\n' {
+                let line = &bytes[self.line_start.max(start)..i];
+                self.examined += line.len();
+                self.line_start = i + 1;
+                if let Some(class) = line_class(line) {
+                    self.scanned = i + 1;
+                    self.decided = Some(class);
+                    return;
+                }
+            }
+        }
+        self.scanned = self.scanned.max(end);
+        // The classified part is all here: its last line is complete.
+        if bytes.len() >= cap {
+            self.tail(bytes, cap);
+        }
+    }
+
+    /// The reply is over (the peer closed, or the body stream ended): its
+    /// last line counts as complete.
+    pub fn close(&mut self, bytes: &[u8]) {
+        self.feed(bytes);
+        if self.decided.is_none() {
+            match self.body {
+                Some((_, cap)) => self.tail(bytes, bytes.len().min(cap)),
+                None => self.decided = Some(Class::Failed),
+            }
+        }
+    }
+
+    /// Whether reading can stop: the class is known.
+    #[must_use]
+    pub fn decided(&self) -> bool {
+        self.decided.is_some()
+    }
+
+    /// The class: the decided one, or `Failed`.
+    #[must_use]
+    pub fn class(&self) -> Class {
+        self.decided.unwrap_or(Class::Failed)
+    }
+
+    /// Decide by the last line, up to `end`, known complete.
+    fn tail(&mut self, bytes: &[u8], end: usize) {
+        let Some((start, _)) = self.body else { return };
+        let line = &bytes[self.line_start.max(start).min(end)..end];
+        self.examined += line.len();
+        self.decided = Some(line_class(line).unwrap_or(Class::Failed));
+    }
+
+    /// Look for the header block, deciding `Failed` at the first sign that
+    /// the reply is not HTTP/1.x or not a 200. Returns the body's bounds
+    /// once found.
+    fn head(&mut self, bytes: &[u8]) -> Option<(usize, usize)> {
+        const PREFIX: &[u8] = b"HTTP/1.";
+        let n = bytes.len().min(PREFIX.len());
+        if bytes[..n] != PREFIX[..n] {
+            self.decided = Some(Class::Failed);
+            return None;
+        }
+        let from = self.searched.saturating_sub(3);
+        self.examined += bytes.len().saturating_sub(from);
+        if !self.status_seen
+            && let Some(nl) = bytes[from..].iter().position(|&b| b == b'\n')
+        {
+            self.status_seen = true;
+            self.examined += from + nl;
+            if ping::status_and_length(&bytes[..=from + nl]).is_none() {
+                self.decided = Some(Class::Failed);
+                return None;
+            }
+        }
+        let Some(start) = ping::header_end(bytes, from) else {
+            self.searched = bytes.len();
+            return None;
+        };
+        self.examined += start;
+        let Some((200, length, _)) = ping::status_and_length(&bytes[..start]) else {
+            self.decided = Some(Class::Failed);
+            return None;
+        };
+        let cap = start + length.map_or(BODY_MAX, |l| l.min(BODY_MAX));
+        self.body = Some((start, cap));
+        self.line_start = start;
+        self.scanned = start;
+        Some((start, cap))
+    }
+}
+
 /// The query of an advertisement for this cache, in the update form
 /// (Shareaza wiki, "Pinging Caches"; ADR-0021).
 #[must_use]
@@ -286,6 +452,161 @@ mod tests {
             via("http://1.2.3.4:8080/", &me),
             Via::Socket { port: 8080, .. }
         ));
+    }
+
+    const OK_200: &str = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n";
+
+    /// Feed `reply` one byte at a time, as a socket might deliver it.
+    fn trickle(reply: &[u8]) -> ReplyWatch {
+        let mut watch = ReplyWatch::socket();
+        for end in 1..=reply.len() {
+            watch.feed(&reply[..end]);
+        }
+        watch
+    }
+
+    #[test]
+    fn a_trickled_reply_is_watched_in_linear_work() {
+        // A peer padding its headers, then a body with no OK, one byte at a
+        // time up to the socket's read limit: each feed looks at what is new.
+        let mut reply = String::from("HTTP/1.0 200 OK\r\n");
+        reply += &"X-Pad: y\r\n".repeat(400);
+        reply += "\r\n";
+        reply += &"i|update|nothing\r\n".repeat(READ_MAX / 18);
+        let bytes = &reply.as_bytes()[..READ_MAX];
+        let mut watch = ReplyWatch::socket();
+        for end in 1..=bytes.len() {
+            watch.feed(&bytes[..end]);
+        }
+        assert!(watch.examined <= 3 * READ_MAX, "{}", watch.examined);
+        assert!(watch.decided(), "{BODY_MAX} body bytes decide");
+        assert_eq!(watch.class(), Class::Failed);
+    }
+
+    #[test]
+    fn a_reached_content_length_ends_the_last_line() {
+        let reply = "HTTP/1.0 200 OK\r\nContent-Length: 11\r\n\r\ni|update|OK";
+        let watch = trickle(reply.as_bytes());
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Ok);
+        // Short of its length, the line may still be growing.
+        let mut watch = ReplyWatch::socket();
+        watch.feed(&reply.as_bytes()[..reply.len() - 1]);
+        assert!(!watch.decided());
+        assert_eq!(watch.class(), Class::Failed, "incomplete");
+    }
+
+    #[test]
+    fn a_reply_that_is_not_http_is_decided_at_once() {
+        let mut watch = ReplyWatch::socket();
+        watch.feed(b"G");
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Failed);
+        // A status line that starts right but is not one, before the
+        // header block ends.
+        let mut watch = ReplyWatch::socket();
+        watch.feed(b"HTTP/1.0 2x0 nope\r\nX-A: b");
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Failed);
+        // A good status line is not decided early.
+        let mut watch = ReplyWatch::socket();
+        watch.feed(b"HTTP/1.0 200 OK\r\nX-A: b");
+        assert!(!watch.decided());
+        let mut watch = ReplyWatch::socket();
+        watch.feed(b"HTTP/1.");
+        assert!(!watch.decided());
+    }
+
+    #[test]
+    fn a_status_other_than_200_fails_at_once() {
+        let mut watch = ReplyWatch::socket();
+        watch.feed(b"HTTP/1.0 404 Not Found\r\n\r\n");
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Failed);
+        let watch = ReplyWatch::body(302);
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Failed);
+        assert!(!ReplyWatch::body(200).decided());
+    }
+
+    #[test]
+    fn ok_past_the_classified_bytes_fails() {
+        let reply = format!("{OK_200}{}\nOK\n", "x".repeat(BODY_MAX));
+        let watch = trickle(reply.as_bytes());
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Failed);
+        // The fetch path, with the body alone.
+        let body = format!("{}\ni|update|OK\n", "x".repeat(BODY_MAX - 4));
+        let mut watch = ReplyWatch::body(200);
+        watch.feed(body.as_bytes());
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Failed);
+    }
+
+    #[test]
+    fn a_complete_ok_line_decides_and_warning_on_it_warns() {
+        let mut watch = ReplyWatch::body(200);
+        watch.feed(b"i|update|WARNING|Rejected|OK");
+        assert!(!watch.decided(), "the line may still grow");
+        watch.feed(b"i|update|WARNING|Rejected|OK\r");
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Warned);
+        // A later WARNING line changes nothing.
+        let reply = format!("{OK_200}i|update|OK\r\ni|WARNING|x\r\n");
+        let watch = trickle(reply.as_bytes());
+        assert_eq!(watch.class(), Class::Ok);
+    }
+
+    #[test]
+    fn a_closed_reply_ends_its_last_line() {
+        let reply = format!("{OK_200}i|update|OK");
+        let mut watch = trickle(reply.as_bytes());
+        assert!(!watch.decided());
+        watch.close(reply.as_bytes());
+        assert!(watch.decided());
+        assert_eq!(watch.class(), Class::Ok);
+        // Closed before the header block ended.
+        let mut watch = ReplyWatch::socket();
+        watch.close(b"HTTP/1.0 200 OK\r\n");
+        assert_eq!(watch.class(), Class::Failed);
+    }
+
+    #[test]
+    fn the_watch_agrees_with_classify_on_complete_replies() {
+        let bodies = [
+            "",
+            "i|update|OK\r\n",
+            "i|update|OK",
+            "i|update|WARNING|x|OK\n",
+            "i|pong|x\ni|update|ERROR\n",
+            "\r\n\r\nOK",
+            "i|nothing\nWARNING\nOK WARNING\n",
+            "ok\nOk\n",
+        ];
+        let long = format!("{}OK\n", "y".repeat(BODY_MAX - 2));
+        let longer = format!("{}OK\n", "y".repeat(BODY_MAX - 1));
+        for body in bodies
+            .iter()
+            .copied()
+            .chain([long.as_str(), longer.as_str()])
+        {
+            for status in ["200 OK", "500 Oops"] {
+                let reply = format!("HTTP/1.0 {status}\r\n\r\n{body}");
+                let (code, b) = ping::http_reply(reply.as_bytes()).unwrap();
+                let want = classify(Some(code), &b[..b.len().min(BODY_MAX)]);
+                let mut whole = ReplyWatch::socket();
+                whole.feed(reply.as_bytes());
+                whole.close(reply.as_bytes());
+                assert_eq!(whole.class(), want, "{reply:?}");
+                let mut slow = trickle(reply.as_bytes());
+                slow.close(reply.as_bytes());
+                assert_eq!(slow.class(), want, "trickled {reply:?}");
+                let mut fetched = ReplyWatch::body(code);
+                fetched.feed(body.as_bytes());
+                fetched.close(body.as_bytes());
+                assert_eq!(fetched.class(), want, "fetched {body:?}");
+            }
+        }
     }
 
     #[test]
