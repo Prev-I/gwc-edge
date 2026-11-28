@@ -205,8 +205,9 @@ pub struct Reader {
     /// The urlfile scan, if this ping also looks for this cache.
     scan: Option<UrlScan>,
     /// Whether the body has reached its `Content-Length`, which delimits it
-    /// (no `Transfer-Encoding`), with nothing after it but a line end: the
-    /// body is whole, and its last line complete.
+    /// (no `Transfer-Encoding`), and the length does not cut the last line
+    /// short (see `advance`): the body is whole, and its last line complete.
+    /// Bytes that arrive later cannot undo it.
     reached: bool,
     /// Whether the last line, with no line end, went to the scan.
     tail_scanned: bool,
@@ -467,7 +468,9 @@ impl Reader {
         // it, or the length cuts the last line short (anything but a line
         // end follows a non-empty last line). Bytes past a length that ends
         // on a line boundary cut nothing. A settled reader reads no further,
-        // so what arrives after the length is first reached cannot undo it.
+        // so what arrives after the length is first reached cannot undo it:
+        // a read that ends exactly at a wrong length takes a cut last line
+        // as complete, accepted (ADR-0021, controller ruling).
         let cut = !last.is_empty() && bytes.get(end).is_some_and(|b| !matches!(b, b'\r' | b'\n'));
         if !self.reached && !body.chunked && !cut {
             self.reached = true;
@@ -1122,5 +1125,33 @@ mod tests {
         r.close(reply.as_bytes());
         assert_eq!(r.listing(End::Closed), Listing::Unknown);
         assert_eq!(r.listing(End::Deadline), Listing::Unknown);
+    }
+
+    #[test]
+    fn a_read_ending_at_the_length_settles_before_any_cut_shows() {
+        // A wrong Content-Length cuts this cache's line to `gwc.exa`. In one
+        // read, the byte after the length shows the cut: not whole, Unknown
+        // (`a_length_that_cuts_a_line_is_not_whole`). A read that ends
+        // exactly at the length shows nothing after it, so the length counts
+        // as reached and the reader settles there: the cut line is taken as
+        // complete, a third cache, and the listing reads Absent. Accepted
+        // (ADR-0021, controller ruling): settling at the length wins; it
+        // needs a broken peer and an exact split, and costs at most one
+        // spurious advertisement per 30 days.
+        let body = format!("i|pong|Cut|gnutella2\r\n{ME}");
+        let n = body.find(".org").unwrap();
+        let reply = sized(&body, n);
+        let at_length = reply.len() - (body.len() - n);
+        let mut r = scanning();
+        assert_eq!(
+            r.feed(&reply.as_bytes()[..at_length]),
+            Some(pong_named("Cut"))
+        );
+        assert!(r.settled(), "settled after the first read");
+        r.feed(reply.as_bytes());
+        assert_eq!(r.listing(End::Deadline), Listing::Absent);
+        let mut once = scanning();
+        once.feed(reply.as_bytes());
+        assert_eq!(once.listing(End::Deadline), Listing::Unknown);
     }
 }
