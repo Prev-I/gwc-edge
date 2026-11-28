@@ -21,7 +21,10 @@ fuzz_target!(|data: &[u8]| {
     once.close(data);
     let mut body = ReplyWatch::body(200);
     body.close(data);
-    assert_eq!(body.class(), classify(Some(200), &data[..data.len().min(BODY_MAX)]));
+    assert_eq!(
+        body.class(),
+        classify(Some(200), &data[..data.len().min(BODY_MAX)])
+    );
 
     // Without a Content-Length, the class is the one `classify` gives the
     // first BODY_MAX body bytes, however the reply was split. A length
@@ -31,7 +34,11 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let head = &data[..data.len() - rest.len()];
-    if head.to_ascii_lowercase().windows(14).any(|w| w == b"content-length") {
+    if head
+        .to_ascii_lowercase()
+        .windows(14)
+        .any(|w| w == b"content-length")
+    {
         return;
     }
     let want = classify(Some(status), &rest[..rest.len().min(BODY_MAX)]);
