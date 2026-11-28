@@ -961,6 +961,20 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_without_a_third_cache_is_never_absent() {
+        // (a) A pong alone: read whole, but it lists no cache at all.
+        let mut alone = scanning();
+        let pong = format!("{OK}i|pong|Peer 1|gnutella2\r\n");
+        assert_eq!(alone.close(pong.as_bytes()), Some("Peer 1".into()));
+        assert_eq!(alone.listing(End::Closed), Listing::Unknown);
+        // (b) A pong and only the peer's own `u|` line, in any case.
+        let own = format!("{pong}u|http://PEER.example.net:8080/gwc.php|5\r\n");
+        let mut peer = scanning();
+        assert_eq!(peer.close(own.as_bytes()), Some("Peer 1".into()));
+        assert_eq!(peer.listing(End::Closed), Listing::Unknown);
+    }
+
+    #[test]
     fn a_pong_after_the_url_lines_is_still_the_verdict() {
         let reply = format!("{OK}{THIRD}h|1.2.3.4:6346|5\r\ni|pong|Late 1|gnutella2\r\n");
         let mut r = scanning();

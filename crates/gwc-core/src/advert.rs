@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn a_status_other_than_200_fails_at_once() {
+    fn a_status_other_than_200_fails_when_the_headers_end() {
         let mut watch = ReplyWatch::socket();
         watch.feed(b"HTTP/1.0 404 Not Found\r\n\r\n");
         assert!(watch.decided());
