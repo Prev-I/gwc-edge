@@ -8,6 +8,8 @@
 
 use std::net::Ipv4Addr;
 
+use crate::advert::{self, UrlScan};
+
 /// How to send a ping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Via {
@@ -90,7 +92,7 @@ pub fn fetch_url_at(url: &str, at: std::net::SocketAddrV4) -> String {
 #[must_use]
 pub fn http_reply(bytes: &[u8]) -> Option<(u16, &[u8])> {
     let end = header_end(bytes, 0)?;
-    let (status, _) = status_and_length(&bytes[..end])?;
+    let (status, ..) = status_and_length(&bytes[..end])?;
     Some((status, &bytes[end..]))
 }
 
@@ -112,23 +114,27 @@ fn header_end(bytes: &[u8], from: usize) -> Option<usize> {
     }
 }
 
-/// The status code and `Content-Length` of a header block, or `None` if its
-/// first line is not an HTTP/1.x status line.
-fn status_and_length(head: &[u8]) -> Option<(u16, Option<usize>)> {
+/// The status code and `Content-Length` of a header block, and whether it has
+/// a `Transfer-Encoding` header, or `None` if its first line is not an
+/// HTTP/1.x status line.
+fn status_and_length(head: &[u8]) -> Option<(u16, Option<usize>, bool)> {
     let text = std::str::from_utf8(head).ok()?;
     let mut lines = text.lines();
     let code = lines.next()?.strip_prefix("HTTP/1.")?.get(2..5)?;
     if !code.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let length = lines.find_map(|l| {
-        let (name, value) = l.split_once(':')?;
-        name.trim()
-            .eq_ignore_ascii_case("content-length")
-            .then(|| value.trim().parse().ok())
-            .flatten()
-    });
-    Some((code.parse().ok()?, length))
+    let mut length = None;
+    let mut chunked = false;
+    for (name, value) in lines.filter_map(|l| l.split_once(':')) {
+        let name = name.trim();
+        if length.is_none() && name.eq_ignore_ascii_case("content-length") {
+            length = value.trim().parse().ok();
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            chunked = true;
+        }
+    }
+    Some((code.parse().ok()?, length, chunked))
 }
 
 /// What a ping reply says, once it can be judged.
@@ -170,6 +176,15 @@ impl Verdict {
 ///   deadline (see [`Reader::at_deadline`]).
 ///
 /// Half a pong line is never taken for one.
+///
+/// With a scan ([`Reader::scanning`], ADR-0021) it reads on after the pong:
+/// every complete body line goes to the scan, before and after the pong,
+/// until [`Reader::settled`]. The verdict stays the one fixed at the pong
+/// line. The scan sees each line once: lines are cut by one cursor
+/// (`line_start`, `scanned`) that only moves forward across feeds. A last
+/// line with no line end reaches the scan only when the body is known to
+/// be over: at its `Content-Length`, or in [`Reader::close`]. So call
+/// `close` before asking for [`Reader::listing`] at `Closed` or `StreamEnd`.
 #[derive(Debug, Clone, Default)]
 pub struct Reader {
     /// Where the header block ends, once found, with the status and length.
@@ -187,6 +202,12 @@ pub struct Reader {
     /// Bytes looked at so far, header search and line parsing included: the
     /// measure of the work done, which stays linear in the reply's length.
     examined: usize,
+    /// The urlfile scan, if this ping also looks for this cache.
+    scan: Option<UrlScan>,
+    /// Whether the body has reached its `Content-Length`.
+    reached: bool,
+    /// Whether the last line, with no line end, went to the scan.
+    tail_scanned: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,6 +215,31 @@ struct Body {
     start: usize,
     status: u16,
     length: Option<usize>,
+    /// A `Transfer-Encoding` header was present: the body is never known
+    /// to be whole.
+    chunked: bool,
+}
+
+/// How a ping read ended, for [`Reader::listing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The peer closed the socket.
+    Closed,
+    /// `fetch()`'s body stream ended.
+    StreamEnd,
+    /// The body ran past the size limit.
+    Cut,
+    /// The deadline passed, or the connection failed.
+    Deadline,
+}
+
+/// Whether the pinged cache lists this one (ADR-0021).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    Listed,
+    /// Read whole, listing another cache and not this one.
+    Absent,
+    Unknown,
 }
 
 impl Reader {
@@ -212,16 +258,77 @@ impl Reader {
                 start: 0,
                 status,
                 length: None,
+                chunked: false,
             }),
             ..Reader::default()
         }
     }
 
+    /// The same reader, also scanning the urlfile for this cache.
+    #[must_use]
+    pub fn scanning(mut self, scan: UrlScan) -> Reader {
+        self.scan = Some(scan);
+        self
+    }
+
+    /// Whether reading can stop. Without a scan, once there is a verdict.
+    /// With one, once the verdict is no pong, or a pong that is excluded
+    /// from advertisement (Skulls) or whose urlfile listed this cache.
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        match (&self.verdict, &self.scan) {
+            (None, _) => false,
+            (Some(Verdict::NoPong), _) | (Some(Verdict::Pong(_)), None) => true,
+            (Some(Verdict::Pong(name)), Some(scan)) => scan.listed() || advert::excluded(name),
+        }
+    }
+
+    /// The verdict fixed so far, if any.
+    #[must_use]
+    pub fn verdict(&self) -> Option<Verdict> {
+        self.verdict.clone()
+    }
+
+    /// Whether the pinged cache lists this one, once the read ended by
+    /// `end`. Absence needs the body read whole: `fetch()`'s stream ended,
+    /// or the peer closed with the `Content-Length` reached, or with neither
+    /// `Content-Length` nor `Transfer-Encoding`. Always unknown without a
+    /// scan, without a pong, or for an excluded pong.
+    #[must_use]
+    pub fn listing(&self, end: End) -> Listing {
+        let Some(scan) = &self.scan else {
+            return Listing::Unknown;
+        };
+        match self.verdict.as_ref().or(self.provisional.as_ref()) {
+            Some(Verdict::Pong(name)) if !advert::excluded(name) => {
+                if scan.listed() {
+                    Listing::Listed
+                } else if scan.absent(self.whole(end)) {
+                    Listing::Absent
+                } else {
+                    Listing::Unknown
+                }
+            }
+            _ => Listing::Unknown,
+        }
+    }
+
+    fn whole(&self, end: End) -> bool {
+        match end {
+            End::StreamEnd => true,
+            End::Closed => self.body.is_some_and(|b| match b.length {
+                Some(_) => self.reached,
+                None => !b.chunked,
+            }),
+            End::Cut | End::Deadline => false,
+        }
+    }
+
     /// The verdict, once the bytes so far settle it; `None` while more bytes
-    /// could change it.
+    /// could change it. With a scan, also scans the lines that have arrived.
     pub fn feed(&mut self, bytes: &[u8]) -> Option<Verdict> {
-        if self.verdict.is_none() {
-            self.verdict = self.advance(bytes);
+        if !self.settled() {
+            self.advance(bytes);
         }
         self.verdict.clone()
     }
@@ -229,18 +336,42 @@ impl Reader {
     /// The verdict once the peer has closed: whatever arrived is the whole
     /// reply, and its last line counts as complete, unless the body is
     /// shorter than its `Content-Length`. (A body of exactly that length,
-    /// then a close, ends its last line too.)
+    /// then a close, ends its last line too.) That last line goes to the
+    /// scan, and the verdict is fixed.
     pub fn close(&mut self, bytes: &[u8]) -> Option<String> {
-        if let Some(verdict) = self.feed(bytes) {
+        let fed = self.feed(bytes);
+        let last = self.body.and_then(|body| {
+            let end = match body.length {
+                Some(n) if bytes.len() < body.start + n => return None,
+                Some(n) => body.start + n,
+                None => bytes.len(),
+            };
+            Some(&bytes[self.line_start.min(end)..end])
+        });
+        if let Some(line) = last
+            && !self.settled()
+        {
+            self.scan_tail(line);
+        }
+        if let Some(verdict) = fed {
             return verdict.pong();
         }
-        let body = self.body?;
-        let end = match body.length {
-            Some(n) if bytes.len() < body.start + n => return None,
-            Some(n) => body.start + n,
-            None => bytes.len(),
-        };
-        pong_line(&bytes[self.line_start.min(end)..end])
+        let verdict = Verdict::of(pong_line(last?));
+        self.verdict = Some(verdict.clone());
+        verdict.pong()
+    }
+
+    /// Hand the last line, known complete with no line end, to the scan,
+    /// once.
+    fn scan_tail(&mut self, line: &[u8]) {
+        if let Some(scan) = self.scan.as_mut()
+            && !self.tail_scanned
+            && !line.is_empty()
+        {
+            self.examined += line.len();
+            scan.line(line);
+            self.tail_scanned = true;
+        }
     }
 
     /// The verdict at the deadline, when the peer neither closed nor sent
@@ -261,7 +392,9 @@ impl Reader {
         self.examined
     }
 
-    fn advance(&mut self, bytes: &[u8]) -> Option<Verdict> {
+    /// Read on from where the last call stopped, fixing the verdict when the
+    /// bytes settle it. Stops as soon as the reader is settled.
+    fn advance(&mut self, bytes: &[u8]) {
         let body = if let Some(body) = self.body {
             body
         } else {
@@ -269,15 +402,17 @@ impl Reader {
             self.examined += bytes.len().saturating_sub(from);
             let Some(end) = header_end(bytes, from) else {
                 self.searched = bytes.len();
-                return None;
+                return;
             };
-            let Some((status, length)) = status_and_length(&bytes[..end]) else {
-                return Some(Verdict::NoPong);
+            let Some((status, length, chunked)) = status_and_length(&bytes[..end]) else {
+                self.verdict = Some(Verdict::NoPong);
+                return;
             };
             let body = Body {
                 start: end,
                 status,
                 length,
+                chunked,
             };
             self.body = Some(body);
             self.line_start = end;
@@ -285,7 +420,8 @@ impl Reader {
             body
         };
         if body.status != 200 {
-            return Some(Verdict::NoPong);
+            self.verdict = Some(Verdict::NoPong);
+            return;
         }
         let limit = body
             .length
@@ -298,32 +434,47 @@ impl Reader {
                 let line = &bytes[self.line_start..i];
                 self.examined += line.len();
                 self.line_start = i + 1;
-                if let Some(name) = pong_line(line) {
-                    return Some(Verdict::Pong(name));
+                if let Some(scan) = self.scan.as_mut() {
+                    scan.line(line);
+                }
+                if self.verdict.is_none()
+                    && let Some(name) = pong_line(line)
+                {
+                    self.verdict = Some(Verdict::Pong(name));
+                }
+                if self.settled() {
+                    return;
                 }
             }
         }
-        match body.length {
-            Some(n) if bytes.len() >= body.start + n => {
-                let end = body.start + n;
-                if self.line_start >= end {
-                    // Every line examined, no pong among them.
-                    return Some(Verdict::NoPong);
-                }
-                // The last line, cut by the length: complete if a line end
-                // follows it, cut short if anything else does, undecided
-                // until more arrives or the peer closes.
-                let last = Verdict::of(pong_line(&bytes[self.line_start..end]));
-                match bytes.get(end) {
-                    Some(b'\r' | b'\n') => Some(last),
-                    Some(_) => Some(Verdict::NoPong),
-                    None => {
-                        self.provisional = Some(last);
-                        None
-                    }
-                }
-            }
-            _ => None,
+        let Some(n) = body.length else {
+            return;
+        };
+        let end = body.start + n;
+        if bytes.len() < end {
+            return;
+        }
+        self.reached = true;
+        // The last line, cut by the length: whole for the scan, since the
+        // body ends there.
+        let last = &bytes[self.line_start.min(end)..end];
+        self.scan_tail(last);
+        if self.verdict.is_some() {
+            return;
+        }
+        if last.is_empty() {
+            // Every line examined, no pong among them.
+            self.verdict = Some(Verdict::NoPong);
+            return;
+        }
+        // For the verdict, it is complete if a line end follows it, cut
+        // short if anything else does, undecided until more arrives or the
+        // peer closes.
+        let verdict = Verdict::of(pong_line(last));
+        match bytes.get(end) {
+            Some(b'\r' | b'\n') => self.verdict = Some(verdict),
+            Some(_) => self.verdict = Some(Verdict::NoPong),
+            None => self.provisional = Some(verdict),
         }
     }
 }
@@ -703,5 +854,202 @@ mod tests {
         assert_eq!(pong(200, b""), None);
         assert_eq!(pong(500, b"i|pong|x|gnutella2\n"), None, "not a 200");
         assert_eq!(pong(200, b"<html>i|pong</html>\n"), None);
+    }
+
+    // Scan mode (ADR-0021): reading on after the pong for this cache's
+    // urlfile line.
+
+    fn scan() -> crate::advert::UrlScan {
+        let me = crate::cache_url::normalize("http://gwc.example.org/").unwrap();
+        crate::advert::UrlScan::new("peer.example.net", &me)
+    }
+
+    fn scanning() -> Reader {
+        Reader::new().scanning(scan())
+    }
+
+    const THIRD: &str = "u|http://third.example.net/|5\r\n";
+    const ME: &str = "u|http://gwc.example.org/|5\r\n";
+
+    #[test]
+    fn without_a_scan_the_reader_stops_at_the_pong_as_before() {
+        let pong = format!("{OK}i|pong|Peer 1|gnutella2\r\n");
+        let reply = format!("{pong}{THIRD}");
+        let mut r = Reader::new();
+        assert!(!r.settled());
+        assert_eq!(r.feed(&pong.as_bytes()[..pong.len() - 3]), None);
+        assert!(!r.settled());
+        assert_eq!(r.feed(pong.as_bytes()), Some(pong_named("Peer 1")));
+        assert!(r.settled());
+        assert_eq!(r.close(reply.as_bytes()), Some("Peer 1".into()));
+        assert_eq!(r.listing(End::Closed), Listing::Unknown);
+        assert_eq!(r.verdict(), Some(pong_named("Peer 1")));
+    }
+
+    #[test]
+    fn a_scan_reads_on_until_this_cache_is_listed() {
+        let pong = format!("{OK}i|pong|Peer 1|gnutella2\r\n");
+        let third = format!("{pong}{THIRD}");
+        let me = format!("{third}{ME}");
+        let reply = format!("{me}u|http://later.example.net/|5\r\n");
+        let mut r = scanning();
+        assert_eq!(r.feed(pong.as_bytes()), Some(pong_named("Peer 1")));
+        assert!(!r.settled(), "this cache not seen yet");
+        assert_eq!(r.feed(third.as_bytes()), Some(pong_named("Peer 1")));
+        assert!(!r.settled());
+        r.feed(me.as_bytes());
+        assert!(r.settled());
+        r.feed(reply.as_bytes());
+        assert_eq!(r.listing(End::Deadline), Listing::Listed);
+        assert_eq!(r.at_deadline(), Some("Peer 1".into()));
+        // Byte by byte, it settles exactly at the end of this cache's line.
+        let mut t = scanning();
+        for end in 1..=reply.len() {
+            t.feed(&reply.as_bytes()[..end]);
+            assert_eq!(t.settled(), end >= me.len() - 1, "{end}");
+        }
+        assert_eq!(t.listing(End::Cut), Listing::Listed);
+        // Listed before the pong: settled only at the pong.
+        let early = format!("{OK}{ME}h|1.2.3.4:6346|5\r\ni|pong|P|gnutella2\r\n");
+        let mut e = scanning();
+        e.feed(&early.as_bytes()[..early.len() - 25]);
+        assert!(!e.settled(), "never before the pong");
+        e.feed(early.as_bytes());
+        assert!(e.settled());
+        assert_eq!(e.listing(End::Deadline), Listing::Listed);
+    }
+
+    #[test]
+    fn a_pong_after_the_url_lines_is_still_the_verdict() {
+        let reply = format!("{OK}{THIRD}h|1.2.3.4:6346|5\r\ni|pong|Late 1|gnutella2\r\n");
+        let mut r = scanning();
+        assert_eq!(r.close(reply.as_bytes()), Some("Late 1".into()));
+        assert_eq!(r.verdict(), Some(pong_named("Late 1")));
+        assert_eq!(r.listing(End::Closed), Listing::Absent);
+    }
+
+    #[test]
+    fn only_a_whole_body_shows_absence() {
+        let reply = format!("{OK}{THIRD}i|pong|Late 1|gnutella2\r\n");
+        let mut r = scanning();
+        assert_eq!(r.feed(reply.as_bytes()), Some(pong_named("Late 1")));
+        assert_eq!(r.listing(End::Cut), Listing::Unknown);
+        assert_eq!(r.listing(End::Deadline), Listing::Unknown);
+        assert_eq!(r.listing(End::StreamEnd), Listing::Absent);
+        // The fetch path: the stream's end is whole.
+        let mut f = Reader::body(200).scanning(scan());
+        let body = format!("i|pong|Fetched|gnutella2\n{THIRD}");
+        assert_eq!(f.close(body.as_bytes()), Some("Fetched".into()));
+        assert_eq!(f.listing(End::StreamEnd), Listing::Absent);
+        assert_eq!(f.listing(End::Cut), Listing::Unknown);
+    }
+
+    #[test]
+    fn the_last_line_counts_at_the_close() {
+        // The peer closed: its last line is complete without a line end, as
+        // for the verdict.
+        let pong = format!("{OK}i|pong|P|gnutella2\r\n");
+        let mut listed = scanning();
+        listed.close(format!("{pong}u|http://gwc.example.org/").as_bytes());
+        assert_eq!(listed.listing(End::Closed), Listing::Listed);
+        let mut absent = scanning();
+        absent.close(format!("{pong}u|http://third.example.net/").as_bytes());
+        assert_eq!(absent.listing(End::Closed), Listing::Absent);
+        // Without a close the half line is not taken.
+        let mut open = scanning();
+        open.feed(format!("{pong}u|http://gwc.example.org/").as_bytes());
+        assert_eq!(open.listing(End::Deadline), Listing::Unknown);
+        assert!(!open.settled());
+    }
+
+    #[test]
+    fn content_length_reached_is_whole() {
+        let body = format!("i|pong|Sized|gnutella2\r\n{THIRD}");
+        let head = |n: usize| format!("HTTP/1.1 200 OK\r\nContent-Length: {n}\r\n\r\n");
+        let mut exact = scanning();
+        assert_eq!(
+            exact.close(format!("{}{body}", head(body.len())).as_bytes()),
+            Some("Sized".into())
+        );
+        assert_eq!(exact.listing(End::Closed), Listing::Absent);
+        let mut short = scanning();
+        assert_eq!(
+            short.close(format!("{}{body}", head(body.len() + 10)).as_bytes()),
+            Some("Sized".into()),
+            "the pong line was complete; the body was not"
+        );
+        assert_eq!(short.verdict(), Some(pong_named("Sized")));
+        assert_eq!(short.listing(End::Closed), Listing::Unknown);
+        // The last line ends at the length, with no line end: it is complete.
+        let mine = "i|pong|Sized|gnutella2\r\nu|http://gwc.example.org/";
+        let mut kept = scanning();
+        kept.feed(format!("{}{mine}", head(mine.len())).as_bytes());
+        assert!(kept.settled());
+        assert_eq!(kept.listing(End::Deadline), Listing::Listed);
+        // Nothing past the length is scanned.
+        let past = format!("{}{body}{ME}", head(body.len()));
+        let mut cut = scanning();
+        cut.feed(past.as_bytes());
+        assert!(!cut.settled());
+        assert_eq!(cut.listing(End::Closed), Listing::Absent);
+    }
+
+    #[test]
+    fn chunked_is_never_whole() {
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+             i|pong|Chunky|gnutella2\r\n{THIRD}"
+        );
+        let mut r = scanning();
+        assert_eq!(r.close(reply.as_bytes()), Some("Chunky".into()));
+        assert_eq!(r.listing(End::Closed), Listing::Unknown);
+    }
+
+    #[test]
+    fn the_verdict_is_fixed_at_the_pong() {
+        let reply = format!(
+            "{OK}i|pong|Fixed|gnutella2\r\n\u{1}<html>|||\r\n{THIRD}i|pong|Other|gnutella2\r\n"
+        );
+        let mut r = scanning();
+        assert_eq!(r.feed(reply.as_bytes()), Some(pong_named("Fixed")));
+        assert_eq!(r.at_deadline(), Some("Fixed".into()));
+        assert_eq!(r.verdict(), Some(pong_named("Fixed")));
+        assert_eq!(r.listing(End::Deadline), Listing::Unknown);
+    }
+
+    #[test]
+    fn no_pong_settles_a_scan() {
+        let mut r = scanning();
+        assert_eq!(r.feed(b"HTTP/1.1 404 Not Found\r\n\r\n"), NO_PONG);
+        assert!(r.settled());
+        assert_eq!(r.listing(End::Closed), Listing::Unknown);
+        // A 200 with no pong, closed: no pong, even with this cache listed.
+        let mut c = scanning();
+        assert_eq!(c.close(format!("{OK}{ME}ERROR\r\n").as_bytes()), None);
+        assert_eq!(c.verdict(), NO_PONG);
+        assert!(c.settled());
+        assert_eq!(c.listing(End::Closed), Listing::Unknown);
+    }
+
+    #[test]
+    fn a_skulls_pong_settles_a_scan() {
+        let pong = format!("{OK}i|pong|Skulls 0.3.6|gnutella2\r\n");
+        let reply = format!("{pong}{THIRD}h|1.2.3.4:6346|5\r\n");
+        let mut r = scanning();
+        assert_eq!(r.feed(pong.as_bytes()), Some(pong_named("Skulls 0.3.6")));
+        assert!(r.settled());
+        r.close(reply.as_bytes());
+        assert_eq!(r.listing(End::Closed), Listing::Unknown);
+    }
+
+    #[test]
+    fn a_trickled_scan_costs_linear_work() {
+        let lines = format!("{OK}i|pong|P|gnutella2\r\n{}", THIRD.repeat(512));
+        let mut r = scanning();
+        for end in 1..=lines.len() {
+            r.feed(&lines.as_bytes()[..end]);
+        }
+        assert!(!r.settled());
+        assert!(r.examined() <= 4 * lines.len(), "{}", r.examined());
     }
 }
