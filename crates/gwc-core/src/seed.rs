@@ -20,6 +20,65 @@ use crate::verify::dead_cache_floor;
 /// Most hubs taken from one seeding.
 pub const MAX_SEED_HUBS: usize = 100;
 
+/// Gnutella2 web caches that answered this cache's ping on 2026-11-28
+/// (ADR-0027), one spelling each, dkac first. Without a named source, a seed
+/// tries them in this order and adds them all as caches. Nothing here is
+/// trusted: the cron pings each before it is served, and drops the dead.
+pub const KNOWN_CACHES: &[&str] = &[
+    "http://dkac.trillinux.org/dkac/dkac.php",
+    "http://bj.ddns.net/beacon/gwc.php",
+    "http://cache.jayl.de/g2/gwc.php",
+    "http://gweb3.4octets.co.uk/gwc.php",
+    "http://midian.jayl.de/g2/gwc.php",
+    "http://midian.jayl.de/g2/bazooka.php",
+    "http://cache.trillinux.org/g2/bazooka.php",
+    "http://gweb4.4octets.co.uk/",
+    "http://bj.ddns.net/perlcache/perlgcache.cgi",
+    "http://bj.ddns.net/cachechu/",
+    "http://gweb.4octets.co.uk/skulls.php",
+    "http://skulls.gwc.dyslexicfish.net/skulls.php",
+    "http://p2p.findclan.net/skulls.php",
+];
+
+/// The caches a seed asks, in order, until one offers a hub: the operator's
+/// source alone when one is named, otherwise [`KNOWN_CACHES`].
+#[must_use]
+pub fn sources(named: Option<&str>) -> Vec<&str> {
+    named.map_or_else(|| KNOWN_CACHES.to_vec(), |from| vec![from])
+}
+
+/// The seed to store: from the first source (see [`sources`]) whose reply,
+/// through `ask`, offers a usable hub. Without a named source each attempt
+/// starts from [`Seed::known`], and this cache itself is never asked; a named
+/// source starts from an empty seed. Each source passed over gets a `note`.
+///
+/// # Errors
+///
+/// When no source offers a hub: nothing may then be seeded.
+pub fn choose<'a>(
+    named: Option<&'a str>,
+    self_url: &CacheUrl,
+    mut ask: impl FnMut(&str, Seed) -> Result<Seed, String>,
+    mut note: impl FnMut(String),
+) -> Result<(&'a str, Seed), String> {
+    for from in sources(named) {
+        if named.is_none() && normalize(from).is_ok_and(|u| is_self(&u, self_url)) {
+            continue;
+        }
+        let start = if named.is_none() {
+            Seed::known(self_url)
+        } else {
+            Seed::default()
+        };
+        match ask(from, start) {
+            Ok(seed) if !seed.hubs.is_empty() => return Ok((from, seed)),
+            Ok(_) => note(format!("{from} offered no usable hub")),
+            Err(e) => note(e),
+        }
+    }
+    Err("no source offered a usable hub; nothing seeded (are they answering G2 gets?)".to_owned())
+}
+
 /// What a cache's replies offered that this cache would store.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Seed {
@@ -76,6 +135,20 @@ impl Seed {
         if !is_self(&url, self_url) && self.seen_urls.insert(url.url.clone()) {
             self.caches.push(url);
         }
+    }
+
+    /// A seed that starts with every [`KNOWN_CACHES`] entry but this cache,
+    /// so that what a source offers comes after them, and the per-host cap
+    /// keeps the caches known to answer.
+    #[must_use]
+    pub fn known(self_url: &CacheUrl) -> Seed {
+        let mut seed = Seed::default();
+        for raw in KNOWN_CACHES {
+            if let Ok(url) = normalize(raw) {
+                seed.add_cache(url, self_url);
+            }
+        }
+        seed
     }
 
     /// SQL storing the seed: one statement per row, each with its cap in its
@@ -278,5 +351,149 @@ mod tests {
             assert_eq!((seed.hubs.len(), seed.caches.len()), (0, 0), "{body}");
             assert_eq!(seed.sql(NOW).matches("INSERT").count(), 0);
         }
+    }
+
+    #[test]
+    fn the_known_caches_are_storable_and_fit_the_caps() {
+        assert_eq!(KNOWN_CACHES[0], "http://dkac.trillinux.org/dkac/dkac.php");
+        let mut hosts: Vec<String> = Vec::new();
+        let mut urls = HashSet::new();
+        for raw in KNOWN_CACHES {
+            let url = normalize(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert_eq!(url.url, *raw, "listed in canonical form");
+            assert!(urls.insert(url.url.clone()), "listed once: {raw}");
+            hosts.push(url.host);
+        }
+        for host in &hosts {
+            let n = hosts.iter().filter(|h| *h == host).count();
+            assert!(n <= MAX_PER_DOMAIN, "{host} has {n}");
+        }
+        assert!((KNOWN_CACHES.len() as u64) < MAX_CACHES);
+    }
+
+    #[test]
+    fn without_a_source_the_known_caches_are_tried_in_order() {
+        assert_eq!(sources(None), KNOWN_CACHES);
+        assert_eq!(
+            sources(Some("http://127.0.0.1:9/gwc/")),
+            ["http://127.0.0.1:9/gwc/"]
+        );
+    }
+
+    #[test]
+    fn the_known_caches_come_first_and_never_this_one() {
+        let on_bj = KNOWN_CACHES
+            .iter()
+            .filter(|u| u.contains("//bj.ddns.net/"))
+            .count();
+        assert_eq!(
+            on_bj, MAX_PER_DOMAIN,
+            "this test needs bj.ddns.net's slots full"
+        );
+        let gweb4 = normalize("http://gweb4.4octets.co.uk/").unwrap();
+        let mut seed = Seed::known(&gweb4);
+        seed.read(
+            "u|http://bj.ddns.net/phpgnucacheii/gwcii.php|60\n\
+             u|http://other.example.net/gwc/|60\n\
+             u|http://dkac.trillinux.org/dkac/dkac.php|60\n",
+            &gweb4,
+        );
+        let urls: Vec<&str> = seed.caches.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(urls.len(), KNOWN_CACHES.len() - 1 + 2, "{urls:?}");
+        assert_eq!(urls[0], KNOWN_CACHES[0]);
+        assert!(
+            !urls.contains(&"http://gweb4.4octets.co.uk/"),
+            "never this cache"
+        );
+        let sql = seed.sql(NOW);
+        assert!(
+            !sql.contains("phpgnucacheii"),
+            "bj.ddns.net's 3 slots go to the known caches first"
+        );
+        assert!(sql.contains("'http://other.example.net/gwc/'"));
+    }
+
+    /// A source as a stub: a reply per URL, or an error.
+    fn stub(
+        replies: &[(&str, Result<&str, &str>)],
+    ) -> impl FnMut(&str, Seed) -> Result<Seed, String> {
+        let replies: Vec<(String, Result<String, String>)> = replies
+            .iter()
+            .map(|(u, r)| ((*u).to_owned(), r.map(str::to_owned).map_err(str::to_owned)))
+            .collect();
+        move |from, mut seed| {
+            let reply = replies
+                .iter()
+                .find(|(u, _)| u == from)
+                .map_or(Ok(String::new()), |(_, r)| r.clone())?;
+            seed.read(&reply, &canonical());
+            Ok(seed)
+        }
+    }
+
+    #[test]
+    fn without_a_source_the_first_known_cache_with_a_hub_is_chosen() {
+        let mut notes = Vec::new();
+        let (from, seed) = choose(
+            None,
+            &canonical(),
+            stub(&[
+                (KNOWN_CACHES[0], Err("timed out")),
+                (KNOWN_CACHES[1], Ok("u|http://other.example.net/gwc/|60\n")),
+                (KNOWN_CACHES[2], Ok("h|8.8.4.4:6346|10\n")),
+            ]),
+            |n| notes.push(n),
+        )
+        .unwrap();
+        assert_eq!(from, KNOWN_CACHES[2]);
+        assert_eq!(seed.hubs.len(), 1);
+        assert_eq!(
+            seed.caches.len(),
+            KNOWN_CACHES.len(),
+            "started from the known caches"
+        );
+        assert_eq!(notes.len(), 2, "one note per source passed over: {notes:?}");
+    }
+
+    #[test]
+    fn a_named_source_is_asked_alone_and_starts_empty() {
+        let named = "http://127.0.0.1:9/gwc/";
+        let (from, seed) = choose(
+            Some(named),
+            &canonical(),
+            stub(&[(named, Ok("h|8.8.4.4:6346|10\n"))]),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(from, named);
+        assert!(seed.caches.is_empty(), "no known caches: {:?}", seed.caches);
+        assert!(
+            choose(
+                Some(named),
+                &canonical(),
+                stub(&[(named, Err("refused"))]),
+                |_| {}
+            )
+            .is_err(),
+            "no fallback past a named source"
+        );
+    }
+
+    #[test]
+    fn no_source_with_a_hub_is_an_error_and_this_cache_is_not_asked() {
+        let gweb4 = normalize("http://gweb4.4octets.co.uk/").unwrap();
+        let mut asked = Vec::new();
+        let result = choose(
+            None,
+            &gweb4,
+            |from: &str, seed: Seed| {
+                asked.push(from.to_owned());
+                Ok(seed)
+            },
+            |_| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(asked.len(), KNOWN_CACHES.len() - 1);
+        assert!(!asked.iter().any(|u| u == "http://gweb4.4octets.co.uk/"));
     }
 }

@@ -2,7 +2,8 @@
 
 **Status:** accepted, 2026-10-24 (after v0.1.0). Amends ADR-0012: its `new`
 queue class also holds seeded hubs, and its `Reregister` also sets the
-source to `update`.
+source to `update`. Amended by ADR-0027: without a named source, a seed
+falls back over, and adds, the known caches.
 
 ## Context
 A new cache knows no hubs. Until hubs register with it or show up in

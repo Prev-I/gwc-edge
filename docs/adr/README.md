@@ -25,7 +25,7 @@ number either way, and from then on the rule above applies.
 | [0013](0013-verification-runs-in-the-cron.md) | Hubs and caches are verified by the cron, not inline |
 | [0014](0014-plain-http-on-a-custom-domain.md) | Plain HTTP, on one Custom Domain; the zone settings Shareaza needs |
 | [0015](0015-deployment-and-frozen-migrations.md) | Deployment renders its config; migrations are frozen from v0.1.0 |
-| [0016](0016-operator-seeding.md) | Operator seeding from another cache; a re-registering hub becomes source `update` (amends 0012) |
+| [0016](0016-operator-seeding.md) | Operator seeding from another cache; a re-registering hub becomes source `update` (amends 0012; amended by 0027) |
 | [0017](0017-cache-url-names-and-dns-rebinding.md) | Cache URL names that cannot be public are refused; DNS rebinding toward clients remains |
 | [0018](0018-deploys-require-green-ci.md) | Every deploy, manual ones included, requires green CI on the exact commit (amends 0015) |
 | [0019](0019-sockets-that-cannot-close.md) | A socket whose connect never settles cannot be closed early; leaks are measured, and expected after timeouts (amends 0012) |
@@ -36,3 +36,4 @@ number either way, and from then on the rule above applies.
 | [0024](0024-support-is-answered.md) | `support=1` is answered with `i\|support\|gnutella2`, so Sharelin keeps this cache (amends 0008) |
 | [0025](0025-a-manual-ci-run-on-main-counts.md) | A CI run started by hand on main counts for the deploy gate, so a fork can deploy (amends 0018) |
 | [0026](0026-start-up-dominates-cpu-time.md) | Start-up dominates the Worker's CPU time; a 22 % smaller module (request URL split without `url`) did not measurably lower it; the module keeps a byte budget (qualifies the 10 ms budget) |
+| [0027](0027-seeding-from-the-known-caches.md) | Without a named source, seeding asks the known caches in order and adds them all before the source's own list (amends 0016) |
