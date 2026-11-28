@@ -34,9 +34,15 @@ pub fn query() -> String {
 /// How to ping the cache at `url`, a URL normalised by `cache_url`.
 #[must_use]
 pub fn via(url: &str) -> Via {
-    let (host, port, request) = socket_request(url);
+    via_query(url, &query())
+}
+
+/// As [`via`], sending `query` instead of the ping query.
+#[must_use]
+pub fn via_query(url: &str, query: &str) -> Via {
+    let (host, port, request) = socket_request_with(url, query);
     if port == 80 && host.parse::<Ipv4Addr>().is_err() {
-        return Via::Fetch(format!("{url}?{}", query()));
+        return Via::Fetch(format!("{url}?{query}"));
     }
     Via::Socket {
         host,
@@ -48,6 +54,10 @@ pub fn via(url: &str) -> Via {
 /// The host, port and HTTP/1.0 request that ping `url` over a socket.
 #[must_use]
 pub fn socket_request(url: &str) -> (String, u16, String) {
+    socket_request_with(url, &query())
+}
+
+fn socket_request_with(url: &str, query: &str) -> (String, u16, String) {
     let rest = url.strip_prefix("http://").unwrap_or(url);
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let (host, port) = match authority.rsplit_once(':') {
@@ -60,7 +70,7 @@ pub fn socket_request(url: &str) -> (String, u16, String) {
          User-Agent: {}\r\n\
          Connection: close\r\n\
          \r\n",
-        query(),
+        query,
         crate::product_id()
     );
     (host.to_owned(), port, request)
