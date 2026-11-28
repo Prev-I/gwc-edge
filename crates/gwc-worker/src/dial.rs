@@ -330,7 +330,6 @@ pub async fn ping_fetch(url: &str, scan: Option<UrlScan>) -> PingResult {
 /// and stops once the reply's class is decided ([`advert::ReplyWatch`]). A
 /// timeout, a failed connection or a cut reply is `Failed` unless already
 /// decided.
-#[expect(dead_code, reason = "the cron advertises from Task 6 of ADR-0021")]
 pub async fn advertise_socket(host: &str, port: u16, request: &str) -> (Class, Leak) {
     let mut watch = advert::ReplyWatch::socket();
     let (bytes, leak) = talk(
@@ -362,7 +361,6 @@ pub async fn advertise_socket(host: &str, port: u16, request: &str) -> (Class, L
 /// decided ([`advert::ReplyWatch`], at most [`advert::BODY_MAX`] bytes and
 /// one chunk) or the body ends. A timeout, or a failed request or body
 /// stream, is `Failed` unless already decided.
-#[expect(dead_code, reason = "the cron advertises from Task 6 of ADR-0021")]
 pub async fn advertise_fetch(url: &str) -> Class {
     within(advert::TIMEOUT_MS, async {
         let request = get_request(url)?;

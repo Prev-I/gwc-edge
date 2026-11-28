@@ -15,9 +15,16 @@
 //! | linger.example.net:6349, lingerfetch.example.net | a pong, then the connection held open | `verified`, without waiting for the close |
 //! | halfpong.example.net:6350 | half a pong line, then the connection held open | `failed` |
 //! | gone.example.net (seeded `failed` twice) | blocked | deleted, and recorded in `dead_caches` |
+//! | unlisted.example.net (two rows), unlisted-sock.example.net:6351 | a pong and a urlfile naming a third cache, not this one | `verified`, and advertised to once (ADR-0021) |
+//! | unlisted-linger.example.net:6352 | the same with a `Content-Length`, then the connection held open | advertised to, without waiting for the close |
+//! | listing.example.net | a urlfile that names this cache | `verified`, never advertised to |
+//! | skulls.example.net | a Skulls pong | `verified`, never advertised to |
 //!
 //! Every other target is blocked, which counts as a failed check. Runs after
 //! the read-path tests and before the write-path ones (name order).
+//!
+//! The advertisement's caches are seeded `verified` and just checked, so no
+//! cron run touches them until a test makes them due ([`make_due`]).
 
 use gwc_testclient::logs::{is_request_line, json_since, len, settle};
 use gwc_testclient::{Client, Reply};
@@ -53,6 +60,80 @@ fn ok_reply(r: &Reply) {
         "{}",
         r.body
     );
+}
+
+fn state_dir() -> String {
+    std::env::var("GWC_STATE_DIR").expect("GWC_STATE_DIR")
+}
+
+/// Age the caches' `last_checked` past the 6 h recheck, so the next cron
+/// runs ping them.
+fn make_due(urls: &[&str]) {
+    let past = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 7 * 3600;
+    let list = urls
+        .iter()
+        .map(|u| format!("'{u}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    gwc_testclient::d1::query(
+        &state_dir(),
+        &format!("UPDATE caches SET last_checked = {past} WHERE url IN ({list})"),
+    );
+}
+
+/// `caches.last_advertised` of the row with this URL.
+fn last_advertised(url: &str) -> Option<u64> {
+    let rows = gwc_testclient::d1::query(
+        &state_dir(),
+        &format!("SELECT last_advertised FROM caches WHERE url = '{url}'"),
+    );
+    let row = rows[0]
+        .first()
+        .unwrap_or_else(|| panic!("no row for {url}"));
+    row["last_advertised"].as_u64()
+}
+
+fn lines_of(log: &str, from: usize, kind: &str) -> Vec<serde_json::Value> {
+    json_since(log, from)
+        .into_iter()
+        .filter(|v| v["kind"] == kind)
+        .collect()
+}
+
+/// The `cron_cache` line for `url` since `from`, if it was pinged.
+fn ping_line(log: &str, from: usize, url: &str) -> Option<serde_json::Value> {
+    lines_of(log, from, "cron_cache")
+        .into_iter()
+        .rfind(|v| v["url"] == url)
+}
+
+/// The last run's part of `/stats`.
+fn last_run(c: &Client) -> serde_json::Value {
+    let stats: serde_json::Value = serde_json::from_str(&c.get("/stats").body).unwrap();
+    stats["cron"].clone()
+}
+
+/// Run the cron until every URL has been pinged since `from` (at most 4
+/// runs). Each run sends at most one advertisement, and `/stats` counts it.
+fn cron_until_pinged(c: &Client, log: &str, from: usize, urls: &[&str]) {
+    for _ in 0..4 {
+        let run_from = len(log);
+        cron(c, log);
+        let sent = lines_of(log, run_from, "cron_advert");
+        assert!(sent.len() <= 1, "one advertisement a run at most: {sent:?}");
+        let run = last_run(c);
+        assert_eq!(run["caches_advertised"], sent.len(), "{run}");
+        let ok = sent.iter().filter(|v| v["class"] == "ok").count();
+        assert_eq!(run["adverts_ok"], ok, "{run}");
+        if urls.iter().all(|u| ping_line(log, from, u).is_some()) {
+            return;
+        }
+    }
+    panic!("not all of {urls:?} were pinged");
 }
 
 fn hub_lines(log: &str, from: usize) -> Vec<serde_json::Value> {
@@ -278,4 +359,120 @@ fn stats_report_the_last_run_and_healthz_the_test_seam() {
     assert_eq!(run["slot_wait_ms"], 0);
     let health: serde_json::Value = serde_json::from_str(&c.get("/healthz").body).unwrap();
     assert_eq!(health["test_dial"], true);
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn a_cache_that_lists_this_one_or_runs_skulls_is_never_advertised_to() {
+    // ADR-0021: listing.example.net's urlfile names this cache, and
+    // skulls.example.net pongs as Skulls. Both stay verified, and neither is
+    // sent anything.
+    let (c, log) = (client(), log_file());
+    let listing = "http://listing.example.net/";
+    let skulls = "http://skulls.example.net/";
+    make_due(&[listing, skulls]);
+    let from = len(&log);
+    cron_until_pinged(&c, &log, from, &[listing, skulls]);
+    for url in [listing, skulls] {
+        assert_eq!(
+            ping_line(&log, from, url).unwrap()["result"],
+            "verified",
+            "{url}"
+        );
+        assert!(
+            lines_of(&log, 0, "cron_advert")
+                .iter()
+                .all(|v| v["url"] != url),
+            "{url} was advertised to"
+        );
+        assert_eq!(last_advertised(url), None, "{url}");
+    }
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn a_cache_whose_reply_has_a_length_is_advertised_to_while_it_lingers() {
+    // ADR-0021: a reply with a Content-Length is whole once that many bytes
+    // have arrived, though the peer keeps the connection open for 20 s; the
+    // advertisement's reply is the same. Neither waits for the 10 s ping
+    // deadline, let alone the close.
+    let (c, log) = (client(), log_file());
+    let linger = "http://unlisted-linger.example.net:6352/";
+    make_due(&[linger]);
+    let from = len(&log);
+    cron_until_pinged(&c, &log, from, &[linger]);
+    assert_eq!(ping_line(&log, from, linger).unwrap()["result"], "verified");
+    let sent: Vec<_> = lines_of(&log, from, "cron_advert")
+        .into_iter()
+        .filter(|v| v["url"] == linger)
+        .collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["class"], "ok", "{}", sent[0]);
+    assert!(sent[0]["ms"].as_u64().unwrap() < 10_000, "{}", sent[0]);
+    let run = lines_of(&log, from, "cron").pop().unwrap();
+    assert!(
+        run["ms"].as_u64().unwrap() < 10_000,
+        "the ping waited for its deadline: {run}"
+    );
+    assert!(last_advertised(linger).is_some());
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn an_unlisting_cache_is_advertised_to_once() {
+    // ADR-0021. Both caches' urlfiles name a third cache and not this one:
+    // unlisted.example.net is fetched (port 80), unlisted-sock over a socket.
+    let (c, log) = (client(), log_file());
+    let fetched = "http://unlisted.example.net/";
+    let other = "http://unlisted.example.net/other/";
+    let socket = "http://unlisted-sock.example.net:6351/";
+    let advert_for = |from: usize, url: &str| -> Vec<serde_json::Value> {
+        lines_of(&log, from, "cron_advert")
+            .into_iter()
+            .filter(|v| v["url"] == url)
+            .collect()
+    };
+
+    // Due together, both qualify, and the first in queue order is advertised
+    // to; the other waits for its next due ping (6 h on).
+    let from = len(&log);
+    make_due(&[fetched, socket]);
+    cron_until_pinged(&c, &log, from, &[fetched, socket]);
+    let sent = lines_of(&log, from, "cron_advert");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let first = sent[0]["url"].as_str().unwrap().to_owned();
+    let second = if first == fetched { socket } else { fetched };
+    // So it is due again now.
+    let from = len(&log);
+    make_due(&[second]);
+    cron_until_pinged(&c, &log, from, &[second]);
+
+    for url in [fetched, socket] {
+        let sent = advert_for(0, url);
+        assert_eq!(sent.len(), 1, "{url}: {sent:?}");
+        assert_eq!(sent[0]["class"], "ok", "{}", sent[0]);
+        assert_eq!(sent[0]["pong"], "fake-cache 1.0", "{}", sent[0]);
+        assert!(last_advertised(url).is_some(), "{url}");
+    }
+    // One stamp covers every row of the host.
+    assert_eq!(last_advertised(other), last_advertised(fetched));
+
+    // Within 30 days, no row of either host is advertised to again, though
+    // all are pinged and still pass.
+    let from = len(&log);
+    make_due(&[fetched, other, socket]);
+    cron_until_pinged(&c, &log, from, &[fetched, other, socket]);
+    for url in [fetched, other, socket] {
+        assert_eq!(ping_line(&log, from, url).unwrap()["result"], "verified");
+        assert!(advert_for(from, url).is_empty(), "{url} advertised again");
+    }
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn healthz_and_stats_show_the_mode() {
+    let c = client();
+    let health: serde_json::Value = serde_json::from_str(&c.get("/healthz").body).unwrap();
+    assert_eq!(health["advertise"], "on");
+    assert_eq!(last_run(&c)["advertise"], "on");
 }

@@ -146,8 +146,8 @@ pub async fn write_back_snapshot(
 /// Record that the cache on `host` was advertised to at `now`: stamps every
 /// row of the host, so the newest value is the host's (ADR-0021). Writes at
 /// most 3 rows (the per-host cap), each in place.
-// Called by the cron from a later task of ADR-0021.
-#[allow(dead_code)]
+/// Run by the cron before it sends the advertisement, as its own statement:
+/// one of the two ledger units the advertisement takes.
 pub async fn stamp_advertised(db: &D1Database, host: &str, now: u64) -> Result<()> {
     db.prepare("UPDATE caches SET last_advertised = ?2 WHERE host = ?1")
         .bind(&[host.into(), num(now)])?
@@ -657,8 +657,6 @@ pub struct QueuedHub {
 
 /// A cache the cron may ping.
 #[derive(Debug, Clone)]
-// ADR-0021 fields: the cron reads them from a later task of that change.
-#[allow(dead_code)]
 pub struct QueuedCache {
     pub url: String,
     pub failures: u64,
@@ -728,7 +726,10 @@ fn queue_sql() -> (String, String) {
 /// Reads: four scans of `hubs` (at most 500 live rows plus
 /// `verify::DEAD_MAX` dead ones; no index, which would cost a written row on
 /// every check), returning at most `HANDSHAKES_PER_RUN` rows per class; one
-/// scan of `caches` (at most 50 rows); the 3 `counts` rows.
+/// scan of `caches` (at most 50 rows), with, for each row that passes its
+/// `WHERE`, a lookup of its host's rows through `caches_host` (at most 3
+/// rows each) for the newest `last_advertised` (ADR-0021); the 3 `counts`
+/// rows.
 ///
 /// A whole run, at full occupancy (500 live and 1,000 dead hubs), scans
 /// `hubs` 11 to 13 times: these four, the purge, the eviction (count and
