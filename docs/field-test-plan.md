@@ -48,9 +48,11 @@ Throughout, `http://gwc.example.org/` stands for your canonical URL.
 
 ## Stage 1: seed the cache
 
-A new cache knows no hubs. Seed it once from `dkac`, the one other G2 cache
-known to be alive when this plan was written, then let the cron verify what
-came in:
+A new cache knows no hubs. Seed it once, then let the cron verify what came
+in. Without `GWC_SEED_FROM`, the seed asks the known caches
+(`gwc_core::seed::KNOWN_CACHES`, ADR-0027) in order, `dkac` first, until one
+offers a hub. (When this plan was written, `dkac` was the one other G2 cache
+known to be alive.)
 
 ```bash
 GWC_CANONICAL_URL=http://gwc.example.org/ scripts/seed.sh fetch seed.sql
@@ -68,13 +70,16 @@ The deploy workflow's token lives only in GitHub and cannot be used here.
 A `seed.sql` at the repository root is git-ignored.
 
 The script:
-- **Asks `dkac` once each** for its G2 hostfile and urlfile, in `fetch`.
-  `fetch` fails and writes nothing if `dkac` offers no hub. An error page or
-  a refusal therefore cannot pass for a seed.
+- **Asks the source once each** for its G2 hostfile and urlfile, in
+  `fetch`. The source is `GWC_SEED_FROM`, or else the first known cache that
+  offers a hub. `fetch` fails and writes nothing if no source offers a hub.
+  An error page or a refusal therefore cannot pass for a seed.
 - **Keeps what this cache's own rules accept:**
   - public IPv4 hubs on port 1024 or above, at most 100;
-  - canonical `http://` caches, at most 3 per host, never this cache; `dkac`
-    itself is one of them;
+  - canonical `http://` caches, at most 3 per host, never this cache. The
+    source itself is one of them. Without `GWC_SEED_FROM`, every known cache
+    comes first, so the per-host cap keeps them ahead of the source's own
+    list;
   - no cache the cron deleted after failed pings in the 48 hours before
     `fetch` ran (ADR-0022). The bound is fixed when `fetch` writes the file,
     so a file applied later errs towards skipping.

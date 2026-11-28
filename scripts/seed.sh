@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# One-shot seeding of a new cache from another one, dkac by default
-# (docs/field-test-plan.md, stage 1). In two steps, so what you review is
-# what gets stored:
+# One-shot seeding of a new cache from another one (docs/field-test-plan.md,
+# stage 1). Without GWC_SEED_FROM, the source is the first of the known caches,
+# dkac first, that offers a hub, and all the known caches are added as caches
+# (ADR-0027). In two steps, so what you review is what gets stored:
 #
 #   scripts/seed.sh fetch seed.sql   ask the source once for its G2 hosts and
-#                                    caches; write the SQL to seed.sql
+#                                    caches; write the SQL to seed.sql. A
+#                                    source that offers no hub is passed over
+#                                    after its hostfile; with every source
+#                                    silent, this takes a few minutes
 #   scripts/seed.sh apply seed.sql   store exactly that file in the deployed D1
 #   scripts/seed.sh apply-local seed.sql <persist-dir>   ... in a local D1 (tests)
 #
 # Hubs are stored `unverified` and caches `pending`: nothing is served before
 # the cron has checked it, over the next hour of runs for a full seed. Caps
 # are enforced in the SQL itself; rows already known are left alone. `fetch`
-# fails, writing nothing, when the source offers no hub.
+# fails, writing nothing, when no source offers a hub.
 #
 # Env: GWC_CANONICAL_URL  required for fetch: this cache, never stored as its
 #                         own peer
-#      GWC_SEED_FROM      source cache (default dkac)
+#      GWC_SEED_FROM      the one source cache to ask (default: the known caches)
 #      CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID, or `wrangler login`, for apply
 set -euo pipefail
 

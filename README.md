@@ -230,7 +230,8 @@ A new cache has no hubs and no clients until others know about it.
   and Skulls caches found it on their own in stage 4.
   [`docs/field-test-plan.md`](docs/field-test-plan.md) covers this step, and
   the stages before it:
-  - seeding this cache from `dkac` with `scripts/seed.sh`;
+  - seeding this cache from the known caches, `dkac` first, with
+    `scripts/seed.sh`;
   - testing it with a real Shareaza, as a leaf and as a hub;
   - a week of observation.
 - **Shareaza's default list.** Open a pull request against

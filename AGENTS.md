@@ -28,7 +28,7 @@ scripts/deploy.sh   render wrangler.deploy.json, migrate, deploy, smoke --prod (
 scripts/wasm-size.sh the built module's byte budget (ADR-0026), run in CI after the build
 scripts/ci-gate.mjs the deploy workflow's gate: main's tip with green CI on that commit (ADR-0018, 0025)
 scripts/fuzz.sh     cargo fuzz on the dated nightly; fuzz/ is its own workspace
-scripts/seed.sh     one-shot seeding from another cache (dkac) via the gwc_seed tool
+scripts/seed.sh     one-shot seeding from the known caches (dkac first) via the gwc_seed tool
 scripts/integration.sh  wrangler dev + isolated seeded D1 + cron run + gwc-testclient tests
 wrangler.jsonc      Worker config; build runs worker-build
 wrangler.no-d1.jsonc  tests only: the Worker without D1, for degraded-mode tests

@@ -4,18 +4,19 @@
 //! writes is served before that check (`gwc_core::seed`).
 //!
 //! Usage: `gwc_seed --self <canonical URL> [--from <cache URL>] > seed.sql`
-//! `scripts/seed.sh` runs it and applies the SQL. It fails, printing no SQL,
-//! when the source offers no hub at all: an error page or a refusal must not
-//! look like a seed.
+//! `scripts/seed.sh` runs it and applies the SQL.
+//!
+//! Without `--from`, it asks the known caches (`gwc_core::seed::KNOWN_CACHES`)
+//! in order until one offers a hub, and adds them all as caches (ADR-0027).
+//! With `--from`, it asks that cache alone. It fails, printing no SQL, when
+//! no source offers a hub: an error page or a refusal must not look like a
+//! seed.
 
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gwc_core::cache_url::normalize;
-use gwc_core::seed::{MAX_SEED_HUBS, Seed};
-
-/// The one other cache known to be alive.
-const DKAC: &str = "http://dkac.trillinux.org/dkac/dkac.php";
+use gwc_core::seed::{MAX_SEED_HUBS, Seed, choose};
 
 const USAGE: &str = "usage: gwc_seed --self <canonical URL> [--from <cache URL>]";
 
@@ -41,11 +42,13 @@ fn main() -> ExitCode {
 
 fn run(args: Vec<String>) -> Result<(), Failure> {
     let (self_url, from) = parse_args(args).map_err(Failure::Usage)?;
-    seed(&self_url, &from).map_err(Failure::Run)
+    seed(&self_url, from.as_deref()).map_err(Failure::Run)
 }
 
-fn parse_args(args: Vec<String>) -> Result<(gwc_core::cache_url::CacheUrl, String), String> {
-    let (mut from, mut self_url) = (DKAC.to_owned(), None);
+fn parse_args(
+    args: Vec<String>,
+) -> Result<(gwc_core::cache_url::CacheUrl, Option<String>), String> {
+    let (mut from, mut self_url) = (None, None);
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -53,7 +56,7 @@ fn parse_args(args: Vec<String>) -> Result<(gwc_core::cache_url::CacheUrl, Strin
                 .ok_or_else(|| format!("{arg} needs a value\n{USAGE}"))
         };
         match arg.as_str() {
-            "--from" => from = value()?,
+            "--from" => from = Some(value()?),
             "--self" => {
                 let v = value()?;
                 self_url = Some(normalize(&v).map_err(|_| format!("bad --self URL: {v}"))?);
@@ -64,13 +67,15 @@ fn parse_args(args: Vec<String>) -> Result<(gwc_core::cache_url::CacheUrl, Strin
     let self_url = self_url.ok_or(USAGE)?;
     // The operator names the source; it only has to be plain HTTP. (A test
     // points it at a local fake cache, which the cache-URL rules refuse.)
-    if !from.starts_with("http://") || from.contains(['?', '#']) {
+    if let Some(from) = &from
+        && (!from.starts_with("http://") || from.contains(['?', '#']))
+    {
         return Err(format!("--from must be a plain http:// URL: {from}"));
     }
     Ok((self_url, from))
 }
 
-fn seed(self_url: &gwc_core::cache_url::CacheUrl, from: &str) -> Result<(), String> {
+fn seed(self_url: &gwc_core::cache_url::CacheUrl, named: Option<&str>) -> Result<(), String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(20)))
         .user_agent(gwc_core::product_id())
@@ -78,7 +83,38 @@ fn seed(self_url: &gwc_core::cache_url::CacheUrl, from: &str) -> Result<(), Stri
         .into();
     // As caches ask each other: `client=TEST`, this cache's name as version.
     let version = format!("{} (seed)", gwc_core::product_id());
-    let mut seed = Seed::default();
+    let (from, seed) = choose(
+        named,
+        self_url,
+        |from, seed| ask(&agent, from, &version, self_url, seed),
+        |note| eprintln!("gwc_seed: {note}"),
+    )?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    eprintln!(
+        "gwc_seed: {} hubs (at most {MAX_SEED_HUBS} kept) from {from}, and {} caches \
+         (the known ones first when no source was named); the caps may store fewer, \
+         and only the cron's checks list them",
+        seed.hubs.len(),
+        seed.caches.len(),
+    );
+    print!("{}", seed.sql(now));
+    Ok(())
+}
+
+/// One source's G2 hostfile and urlfile, added to `seed`, plus the source
+/// itself: a cache too, and one its own urlfile does not list.
+fn ask(
+    agent: &ureq::Agent,
+    from: &str,
+    version: &str,
+    self_url: &gwc_core::cache_url::CacheUrl,
+    mut seed: Seed,
+) -> Result<Seed, String> {
+    let hubs_before = seed.hubs.len();
     for file in ["hostfile", "urlfile"] {
         let body = agent
             .get(from)
@@ -86,34 +122,56 @@ fn seed(self_url: &gwc_core::cache_url::CacheUrl, from: &str) -> Result<(), Stri
             .query(file, "1")
             .query("net", "gnutella2")
             .query("client", "TEST")
-            .query("version", &version)
+            .query("version", version)
             .call()
             .map_err(|e| format!("{from} ({file}): {e}"))?
             .body_mut()
             .read_to_string()
             .map_err(|e| format!("{from} ({file}): {e}"))?;
         seed.read(&body, self_url);
+        // No hub, no seed from here: spare the urlfile request.
+        if seed.hubs.len() == hubs_before {
+            return Ok(seed);
+        }
     }
-    // The source itself is a cache too, and its own urlfile does not list it.
     if let Ok(source) = normalize(from) {
         seed.add_cache(source, self_url);
     }
-    if seed.hubs.is_empty() {
-        return Err(format!(
-            "{from} offered no usable hub; nothing seeded (is it answering G2 gets?)"
-        ));
+    Ok(seed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
-    eprintln!(
-        "gwc_seed: {} hubs (at most {MAX_SEED_HUBS} kept) and {} caches offered by {from}; \
-         the caps may store fewer, and only the cron's checks list them",
-        seed.hubs.len(),
-        seed.caches.len(),
-    );
-    print!("{}", seed.sql(now));
-    Ok(())
+    #[test]
+    fn no_source_named_means_the_known_caches() {
+        let (_, from) = parse_args(args(&["--self", "http://gwc.example.org/"])).unwrap();
+        assert_eq!(from, None);
+    }
+
+    #[test]
+    fn a_named_source_is_parsed_and_must_be_plain_http() {
+        let (_, from) = parse_args(args(&[
+            "--from",
+            "http://127.0.0.1:9/gwc/",
+            "--self",
+            "http://gwc.example.org/",
+        ]))
+        .unwrap();
+        assert_eq!(from.as_deref(), Some("http://127.0.0.1:9/gwc/"));
+        assert!(
+            parse_args(args(&[
+                "--from",
+                "https://x.example/",
+                "--self",
+                "http://gwc.example.org/"
+            ]))
+            .is_err()
+        );
+    }
 }
