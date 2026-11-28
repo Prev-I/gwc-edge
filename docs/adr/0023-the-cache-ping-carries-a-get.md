@@ -1,8 +1,8 @@
 # ADR-0023: The cache ping carries a urlfile get
 
 **Status:** accepted, 2026-10-26. Amends ADR-0012 ("Caches", the request).
-Amended by ADR-0021 (2026-11-28): the ping also scans the urlfile it asks
-for.
+Amended by ADR-0021 (2026-11-28): when an advertisement is due, the ping
+also scans the urlfile it asks for.
 
 ADR-0021 and ADR-0022 were proposed before this record, in a separate pull
 request.

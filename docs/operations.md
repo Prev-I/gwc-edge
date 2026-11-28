@@ -69,8 +69,10 @@ No line carries the requester's address.
   `hubs_served`, `caches`, `stats_rendered`, and, from ADR-0021,
   `advertise` (`on` or `off`), `caches_advertised` (at most one a run),
   `adverts_ok`, `adverts_warned`, `adverts_failed` (how each reply was
-  classified) and `advert_skipped` (a cache qualified but the ledger, the
-  connection slots or the stamp had no room: apart from `skipped_budget`).
+  classified) and `advert_skipped` (a cache qualified but was not sent the
+  advertisement: the ledger or the connection slots had no room, the stamp
+  failed as a D1 error (`d1_error` line, statement `stamp_advertised`), or
+  `TEST_DIAL` blocked its host; apart from `skipped_budget`).
 - `{"kind":"cron_hub",…}`: one per hub checked: `ip`, `port`, `class` (`new`,
   `recheck`, `returning`, `candidate`), `was` (status before), `result` (the
   reply's status code, or `unreachable`, `timeout`, `closed`, `invalid`,
@@ -172,11 +174,12 @@ only loopback test peers, so every real check fails (ADR-0012). `cron` is:
 
 Advertising is off by default. To turn it on, set the repository variable
 `GWC_ADVERTISE` to `on` and deploy; check that `/healthz` then reports
-`"advertise":"on"`. To turn it off, set the variable to `off` or delete it,
-and deploy. Each run then advertises this cache to at most one verified cache
-whose urlfile reply, read whole, lists other caches but not this one, at most
-once in 30 days per host, never to a cache whose pong starts with Skulls
-(ADR-0021). Watch `cron_advert` lines and the `adverts_*` fields of `/stats`.
+`"advertise":"on"`. While it is on, each run advertises this cache to at most
+one verified cache whose urlfile reply, read whole, lists other caches but not
+this one, at most once in 30 days per host, never to a cache whose pong starts
+with Skulls (ADR-0021). Watch `cron_advert` lines and the `adverts_*` fields
+of `/stats`. To turn it off, set the variable to `off` or delete it, and
+deploy.
 
 ## Expected failure modes
 

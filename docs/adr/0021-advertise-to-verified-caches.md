@@ -49,7 +49,7 @@ Fixing the ping changes what counts as verification (`docs/protocol.md`,
 "Cache verification"), so it is a decision of its own, not part of this
 record. Until it is made, no Cachechu cache would receive an advertisement.
 
-## Decision (proposed, revised 2026-11-28)
+## Decision (revised 2026-11-28, accepted)
 The 2026-10-26 proposal re-advertised every verified cache once a week, and
 only after field test stages 2 and 3 had passed (they did on 2026-11-09). That
 is replaced by the following; "Revised, 2026-11-28" below says why. The
