@@ -1,0 +1,5 @@
+HTTP/1.1 200 OK
+Content-Length: 50
+
+i|pong|Sized|gnutella2
+u|http://third.example.net/|5
