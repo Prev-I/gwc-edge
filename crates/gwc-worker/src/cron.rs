@@ -345,17 +345,25 @@ async fn ping_cache(
         run.skipped_budget += 1;
         return None;
     }
-    let (pong, leak) = match (dial, ping::via(&cache.url)) {
-        (Dial::Blocked, _) => (None, dial::Leak::default()),
+    let (outcome, leak) = match (dial, ping::via(&cache.url)) {
+        (Dial::Blocked, _) => (
+            dial::PingResult {
+                pong: None,
+                listing: ping::Listing::Unknown,
+            },
+            dial::Leak::default(),
+        ),
         // TEST_DIAL: the same method, aimed at the mapped loopback address.
         (Dial::Mapped(a), Via::Fetch(_)) => (
-            dial::ping_fetch(&ping::fetch_url_at(&cache.url, a)).await,
+            dial::ping_fetch(&ping::fetch_url_at(&cache.url, a), None).await,
             dial::Leak::default(),
         ),
         (Dial::Mapped(a), Via::Socket { .. }) => {
-            dial::ping_socket(&a.ip().to_string(), a.port(), &request).await
+            dial::ping_socket(&a.ip().to_string(), a.port(), &request, None).await
         }
-        (Dial::Direct, Via::Fetch(url)) => (dial::ping_fetch(&url).await, dial::Leak::default()),
+        (Dial::Direct, Via::Fetch(url)) => {
+            (dial::ping_fetch(&url, None).await, dial::Leak::default())
+        }
         (
             Dial::Direct,
             Via::Socket {
@@ -363,11 +371,11 @@ async fn ping_cache(
                 port,
                 request,
             },
-        ) => dial::ping_socket(&host, port, &request).await,
+        ) => dial::ping_socket(&host, port, &request, None).await,
     };
     note_leak(run, leaks, leak);
     run.caches_pinged += 1;
-    let action = verify::after_ping(cache.failures, pong);
+    let action = verify::after_ping(cache.failures, outcome.pong);
     let result = match action {
         CacheAction::Verified { .. } => {
             run.caches_verified += 1;

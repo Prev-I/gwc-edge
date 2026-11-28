@@ -9,11 +9,11 @@ use crate::ping::{self, Via};
 /// Seconds between two advertisements to the same host: 30 days.
 pub const INTERVAL: u64 = 30 * 24 * 3600;
 
-/// Seconds allowed for one advertisement round trip.
+/// Milliseconds allowed for one advertisement round trip.
 pub const TIMEOUT_MS: u64 = 20_000;
 /// Bytes of a reply body that are classified.
 pub const BODY_MAX: usize = 2 * 1024;
-/// Bytes of a peer's urlfile that are scanned.
+/// Bytes read from the socket for one advertisement reply, headers included.
 pub const READ_MAX: usize = 8 * 1024;
 
 /// Whether to advertise to `host` now: the feature is on, the cache is
