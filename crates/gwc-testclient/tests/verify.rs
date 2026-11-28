@@ -17,6 +17,7 @@
 //! | gone.example.net (seeded `failed` twice) | blocked | deleted, and recorded in `dead_caches` |
 //! | unlisted.example.net (two rows), unlisted-sock.example.net:6351 | a pong and a urlfile naming a third cache, not this one | `verified`, and advertised to once (ADR-0021) |
 //! | unlisted-linger.example.net:6352 | the same with a `Content-Length`, then the connection held open | advertised to, without waiting for the close |
+//! | keepopen-sock.example.net:6353, keepopen.example.net | the same with no `Content-Length`, held open past the ping deadline | `verified` at the deadline, never advertised to |
 //! | listing.example.net | a urlfile that names this cache | `verified`, never advertised to |
 //! | skulls.example.net | a Skulls pong | `verified`, never advertised to |
 //!
@@ -394,8 +395,9 @@ fn a_cache_that_lists_this_one_or_runs_skulls_is_never_advertised_to() {
 #[ignore = "needs a running cache: scripts/integration.sh"]
 fn a_cache_whose_reply_has_a_length_is_advertised_to_while_it_lingers() {
     // ADR-0021: a reply with a Content-Length is whole once that many bytes
-    // have arrived, though the peer keeps the connection open for 20 s; the
-    // advertisement's reply is the same. Neither waits for the 10 s ping
+    // have arrived, though the peer keeps the connection open for 20 s. The
+    // advertisement's reply is the same, and its `i|update|OK` has no line
+    // end: only the length completes it. Neither waits for the 10 s ping
     // deadline, let alone the close.
     let (c, log) = (client(), log_file());
     let linger = "http://unlisted-linger.example.net:6352/";
@@ -416,6 +418,37 @@ fn a_cache_whose_reply_has_a_length_is_advertised_to_while_it_lingers() {
         "the ping waited for its deadline: {run}"
     );
     assert!(last_advertised(linger).is_some());
+}
+
+#[test]
+#[ignore = "needs a running cache: scripts/integration.sh"]
+fn a_verified_cache_that_keeps_its_connection_open_is_not_advertised_to() {
+    // ADR-0021, the dial half: the urlfile names a third cache and not this
+    // one, but with no Content-Length the peer holds the connection open
+    // past the 10 s ping deadline. The scan keeps reading after the pong, so
+    // the deadline ends the read: the pong fixed earlier still stands
+    // (`verified`), but the body was never read whole, so nothing is sent.
+    // Over a socket and through fetch (port 80).
+    let (c, log) = (client(), log_file());
+    let socket = "http://keepopen-sock.example.net:6353/";
+    let fetched = "http://keepopen.example.net/";
+    make_due(&[socket, fetched]);
+    let from = len(&log);
+    cron_until_pinged(&c, &log, from, &[socket, fetched]);
+    for url in [socket, fetched] {
+        assert_eq!(
+            ping_line(&log, from, url).unwrap()["result"],
+            "verified",
+            "{url}: the deadline lost the pong"
+        );
+        assert!(
+            lines_of(&log, 0, "cron_advert")
+                .iter()
+                .all(|v| v["url"] != url),
+            "{url} was advertised to: the deadline was taken for a whole body"
+        );
+        assert_eq!(last_advertised(url), None, "{url}");
+    }
 }
 
 #[test]

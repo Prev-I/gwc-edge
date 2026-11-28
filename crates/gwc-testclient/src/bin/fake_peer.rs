@@ -19,7 +19,8 @@
 //! | base + 11 | a GWebCache whose urlfile names a third cache, not this one; `i|update|OK` to an advertisement (`update=1`) |
 //! | base + 12 | the same, but its urlfile also names this cache (`gwc.example.org`) |
 //! | base + 13 | base + 11's reply with a Skulls pong |
-//! | base + 14 | base + 11's replies with a `Content-Length`, then the connection held open for 20 s |
+//! | base + 14 | base + 11's replies with a `Content-Length` (the advertisement's body with no line end, so the length decides it), then the connection held open for 20 s |
+//! | base + 15 | base + 11's reply with no `Content-Length`, then the connection held open for 20 s |
 //!
 //! base + 4 is left closed, for a connection that is refused.
 
@@ -40,7 +41,7 @@ fn main() {
         .nth(1)
         .and_then(|p| p.parse().ok())
         .expect("usage: fake_peer <base-port>");
-    let behaviours: [(u16, Behaviour); 14] = [
+    let behaviours: [(u16, Behaviour); 15] = [
         (0, |_| hub_ok()),
         (1, |_| hub_full()),
         (2, |_| leaf()),
@@ -55,10 +56,11 @@ fn main() {
         (12, |r| advertised(r, "fake-cache 1.0", true, false)),
         (13, |r| advertised(r, "Skulls 0.3.6", false, false)),
         (14, |r| advertised(r, "fake-cache 1.0", false, true)),
+        (15, |r| advertised(r, "fake-cache 1.0", false, false)),
     ];
     let mut threads = Vec::new();
     for (offset, reply) in behaviours {
-        let linger = matches!(offset, 9 | 10 | 14);
+        let linger = matches!(offset, 9 | 10 | 14 | 15);
         let listener = TcpListener::bind(("127.0.0.1", base + offset))
             .unwrap_or_else(|e| panic!("bind {}: {e}", base + offset));
         threads.push(std::thread::spawn(move || {
@@ -67,7 +69,7 @@ fn main() {
             }
         }));
     }
-    println!("fake_peer: listening on 127.0.0.1:{base}..{}", base + 14);
+    println!("fake_peer: listening on 127.0.0.1:{base}..{}", base + 15);
     for t in threads {
         let _ = t.join();
     }
@@ -164,12 +166,15 @@ fn other_cache(request: &[u8]) -> Vec<u8> {
 /// pong `name` and a urlfile naming a third cache, and this one too when
 /// `lists_me`; an advertisement (`update=1`) gets `i|update|OK`. Nothing is
 /// recorded. With `length`, the reply carries a `Content-Length`, so a
-/// reader can tell it whole while the connection stays open.
+/// reader can tell it whole while the connection stays open; the
+/// advertisement's body then has no line end, so only the length can
+/// complete its line.
 fn advertised(request: &[u8], name: &str, lists_me: bool, length: bool) -> Vec<u8> {
     let request = String::from_utf8_lossy(request);
     let line = request.lines().next().unwrap_or_default();
     let body = if line.contains("update=1") {
-        "i|update|OK\r\n".to_owned()
+        let end = if length { "" } else { "\r\n" };
+        format!("i|update|OK{end}")
     } else {
         let me = if lists_me {
             "u|http://gwc.example.org/|60\r\n"
