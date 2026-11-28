@@ -12,7 +12,7 @@
 # Usage: scripts/integration.sh      (needs mise tools on PATH)
 # Env:   GWC_PORT       port for wrangler dev (default 18789); the degraded
 #                       Worker uses the next port
-#        GWC_FAKE_PORT  first of the fake peers' 11 ports (default GWC_PORT + 10)
+#        GWC_FAKE_PORT  first of the fake peers' 16 ports (default GWC_PORT + 10)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -41,6 +41,20 @@ test_dial+=",redirect.example.net=127.0.0.1:$((fake_port + 7))"
 test_dial+=",linger.example.net=127.0.0.1:$((fake_port + 9))"
 test_dial+=",lingerfetch.example.net=127.0.0.1:$((fake_port + 9))"
 test_dial+=",halfpong.example.net=127.0.0.1:$((fake_port + 10))"
+# Verified caches the cron may advertise to (ADR-0021): two whose urlfile
+# names a third cache and not this one, one fetched (port 80) and one over a
+# socket; one that lists this cache; a Skulls; and one that holds its
+# connection open after a reply with a Content-Length.
+test_dial+=",unlisted.example.net=127.0.0.1:$((fake_port + 11))"
+test_dial+=",unlisted-sock.example.net=127.0.0.1:$((fake_port + 11))"
+test_dial+=",listing.example.net=127.0.0.1:$((fake_port + 12))"
+test_dial+=",skulls.example.net=127.0.0.1:$((fake_port + 13))"
+test_dial+=",unlisted-linger.example.net=127.0.0.1:$((fake_port + 14))"
+# Verified caches whose urlfile names a third cache, with no Content-Length,
+# that hold the connection open past the ping deadline: over a socket and
+# through fetch. The read never ends whole, so they are never advertised to.
+test_dial+=",keepopen-sock.example.net=127.0.0.1:$((fake_port + 15))"
+test_dial+=",keepopen.example.net=127.0.0.1:$((fake_port + 15))"
 # The advertised URL, passed explicitly so the tests do not depend on the
 # value a deployer puts in wrangler.jsonc.
 self_url="http://gwc.example.org/"
@@ -77,7 +91,7 @@ for b in "$base" "$degraded_base"; do
     exit 1
   fi
 done
-for p in $(seq "$fake_port" $((fake_port + 10))); do
+for p in $(seq "$fake_port" $((fake_port + 15))); do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     echo "port $p is already in use; set GWC_FAKE_PORT" >&2
     exit 1
@@ -130,7 +144,7 @@ await_health() {
 # --test-scheduled exposes /cdn-cgi/local/scheduled, to run the cron on demand.
 start_worker() {
   wrangler dev --port "$port" --ip 127.0.0.1 --persist-to "$state" --test-scheduled \
-    --var "CANONICAL_URL:$self_url" --var "TEST_DIAL:$test_dial" >>"$log" 2>&1 &
+    --var "CANONICAL_URL:$self_url" --var "TEST_DIAL:$test_dial" --var "ADVERTISE:on" >>"$log" 2>&1 &
   pid=$!
   await_health "$base" 200 "$pid"
 }
@@ -185,6 +199,7 @@ health="$(curl "${curl_opts[@]}" "${base}healthz")" || fail "healthz request fai
 grep -q '"stats":' <<<"$health" || fail "cron did not render stats: $health"
 grep -q '"cron":"ok"' <<<"$health" || fail "cron heartbeat missing: $health"
 grep -q '"test_dial":true' <<<"$health" || fail "healthz does not report TEST_DIAL: $health"
+grep -q '"advertise":"on"' <<<"$health" || fail "healthz does not report ADVERTISE: $health"
 kill -0 "$fake_pid" 2>/dev/null || fail "fake_peer is not running"
 grep -q '"event":"cron_failed"' "$log" && fail "cron logged a failure"
 grep -q '"verification_failed":true' "$log" && fail "the cron's verification failed"
@@ -202,6 +217,20 @@ wrangler d1 execute DB --local --persist-to "$state" --command "
   INSERT INTO caches (url, host, status, first_seen, last_checked, failures) VALUES
     ('http://gone.example.net/Gwc/', 'gone.example.net', 'failed', $((now - 9000)), $((now - 7200)), 2);
   UPDATE counts SET n = n + 1 WHERE k = 'caches';
+  -- Verified caches for the advertisement (ADR-0021, tests/verify.rs). Just
+  -- checked, so the cron leaves them alone until a test makes them due by
+  -- ageing last_checked past 6 h: earlier tests' cron runs would otherwise
+  -- ping, and advertise to, them first.
+  INSERT INTO caches (url, host, status, first_seen, last_checked, last_verified, failures) VALUES
+    ('http://unlisted.example.net/', 'unlisted.example.net', 'verified', $((now - 9000)), $now, $now, 0),
+    ('http://unlisted.example.net/other/', 'unlisted.example.net', 'verified', $((now - 9000)), $now, $now, 0),
+    ('http://unlisted-sock.example.net:6351/', 'unlisted-sock.example.net', 'verified', $((now - 9000)), $now, $now, 0),
+    ('http://unlisted-linger.example.net:6352/', 'unlisted-linger.example.net', 'verified', $((now - 9000)), $now, $now, 0),
+    ('http://listing.example.net/', 'listing.example.net', 'verified', $((now - 9000)), $now, $now, 0),
+    ('http://skulls.example.net/', 'skulls.example.net', 'verified', $((now - 9000)), $now, $now, 0),
+    ('http://keepopen-sock.example.net:6353/', 'keepopen-sock.example.net', 'verified', $((now - 9000)), $now, $now, 0),
+    ('http://keepopen.example.net/', 'keepopen.example.net', 'verified', $((now - 9000)), $now, $now, 0);
+  UPDATE counts SET n = n + 8 WHERE k = 'caches';
   -- Records the cron's expiry must delete (past 48 h) and keep (an hour left).
   INSERT INTO dead_caches (url, died) VALUES
     ('http://expired.example.net/', $((now - 172800 - 60))),

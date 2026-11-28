@@ -34,7 +34,10 @@
     "HOSTFILE_COUNT": "20",
     "URLFILE_COUNT": "20",
     // Comma-separated vendor codes that get no hosts. CRUX is CruxP2P.
-    "CLIENT_DENYLIST": "CRUX"
+    "CLIENT_DENYLIST": "CRUX",
+    // "on" lets the cron advertise this cache to verified caches (ADR-0021).
+    // Off here; deploy.sh sets it from GWC_ADVERTISE.
+    "ADVERTISE": "off"
   },
   // Rate limiting (ADR-0005): per source and kind, no D1 writes. The
   // namespace ids only need to be unique within the Cloudflare account.

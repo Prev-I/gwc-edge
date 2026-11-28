@@ -1,10 +1,11 @@
 # ADR-0021: The cron advertises this cache to the caches it verifies
 
-**Status:** proposed, 2026-10-26; revisited 2026-11-14; revised 2026-11-28,
-after a review and an expert review: advertise only where this cache is
-shown to be missing, behind a deployment flag that is off by default, never
-to Skulls. Would amend ADR-0012 ("Caches", "Budget"), ADR-0015 (what the
-render adds) and ADR-0023 (Consequences: the cron's cost).
+**Status:** accepted, 2026-11-28 (pull request #47). Proposed 2026-10-26;
+revisited 2026-11-14; revised 2026-11-28, after a review and an expert
+review: advertise only where this cache is shown to be missing, behind a
+deployment flag that is off by default, never to Skulls. Amends ADR-0012
+("Caches", "Budget"), ADR-0015 (what the render adds) and ADR-0023
+(Consequences: the cron's cost).
 
 ## Context
 Other GWebCaches learn about this one in only two ways today:
@@ -48,7 +49,7 @@ Fixing the ping changes what counts as verification (`docs/protocol.md`,
 "Cache verification"), so it is a decision of its own, not part of this
 record. Until it is made, no Cachechu cache would receive an advertisement.
 
-## Decision (proposed, revised 2026-11-28)
+## Decision (revised 2026-11-28, accepted)
 The 2026-10-26 proposal re-advertised every verified cache once a week, and
 only after field test stages 2 and 3 had passed (they did on 2026-11-09). That
 is replaced by the following; "Revised, 2026-11-28" below says why. The

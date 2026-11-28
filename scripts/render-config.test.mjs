@@ -27,6 +27,14 @@ test("the shipped template renders with id, route and canonical URL", () => {
   assert.deepEqual(out.triggers.crons, ["*/10 * * * *"]);
 });
 
+test("advertise defaults to off, accepts on, and refuses anything else", () => {
+  const template = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  const base = { canonicalUrl: "http://gwc.example.net/", databaseId: ID };
+  assert.equal(JSON.parse(render(template, base)).vars.ADVERTISE, "off");
+  assert.equal(JSON.parse(render(template, { ...base, advertise: "on" })).vars.ADVERTISE, "on");
+  assert.throws(() => render(template, { ...base, advertise: "maybe" }), /advertise must be off or on/);
+});
+
 test("only a plain-HTTP canonical URL on port 80 is accepted", () => {
   assert.equal(canonicalHost("http://gwc.example.org/"), "gwc.example.org");
   assert.equal(canonicalHost("http://gwc.example.org/gwc/"), "gwc.example.org");

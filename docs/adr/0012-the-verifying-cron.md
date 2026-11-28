@@ -3,7 +3,9 @@
 **Status:** accepted, 2026-10-24, after an expert review. Amends ADR-0006
 (the hub cap counts live rows only) and ADR-0011 (a `dead` hub is not
 requeued as `unverified` by its own update, and a requeue never resets
-`failures`). Settles the two questions ADR-0011 left open.
+`failures`). Settles the two questions ADR-0011 left open. Amended by
+ADR-0021 (2026-11-28): the cron may advertise this cache to one verified
+cache a run, with free ledger units only.
 
 ## Context
 Since ADR-0011, a hub is listed only after a successful G2 handshake, and
@@ -144,6 +146,9 @@ The 16 places are shared between four classes, each with a reserved number:
 - **What happens when it runs out.** Hubs that do not fit are counted as
   `skipped_budget` and wait for the next run.
 - **Visibility.** The run's count is logged as `subrequests`.
+- **The advertisement** (ADR-0021) is outside the reserved tail: it takes
+  two units, the stamp and the request, only when the ledger has both
+  free, and is otherwise skipped (`advert_skipped`).
 
 ### Applying results
 All results of a run are applied in one D1 batch. Its guards are evaluated

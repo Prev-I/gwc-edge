@@ -14,6 +14,7 @@
     "CANONICAL_URL": "http://gwc.example.org/",
     "HOSTFILE_COUNT": "20",
     "URLFILE_COUNT": "20",
-    "CLIENT_DENYLIST": "CRUX"
+    "CLIENT_DENYLIST": "CRUX",
+    "ADVERTISE": "off"
   }
 }

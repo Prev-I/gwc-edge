@@ -1,6 +1,7 @@
 # ADR-0015: Deployment renders its config; migrations are frozen
 
-**Status:** accepted, 2026-10-24.
+**Status:** accepted, 2026-10-24. Amended by ADR-0021 (2026-11-28): the
+render also sets `ADVERTISE`, from the optional variable `GWC_ADVERTISE`.
 
 ## Context
 `wrangler.jsonc` is committed and shared by everyone who deploys the cache.

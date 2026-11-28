@@ -44,3 +44,10 @@ path = "fuzz_targets/ping_reply.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "advert_reply"
+path = "fuzz_targets/advert_reply.rs"
+test = false
+doc = false
+bench = false

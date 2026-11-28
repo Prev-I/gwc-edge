@@ -14,8 +14,9 @@ use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use gwc_core::advert::{self, Class, UrlScan};
 use gwc_core::handshake::{self, Exchange, Parse};
-use gwc_core::ping;
+use gwc_core::ping::{self, Listing};
 use gwc_core::verify::{CLOSE_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, PING_BODY_MAX, PING_TIMEOUT_MS};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use worker::wasm_bindgen_futures::spawn_local;
@@ -171,13 +172,30 @@ pub async fn handshake(host: &str, port: u16) -> (Exchange, Leak) {
     (exchange, leak)
 }
 
+/// What a ping found: the cache's pong name, if it answered one, and
+/// whether its urlfile lists this cache (ADR-0021).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PingResult {
+    pub pong: Option<String>,
+    pub listing: Listing,
+}
+
 /// Ping a cache over a socket: plain HTTP/1.0, no redirects. Returns the
 /// cache's pong name, if it answered one. Reading stops as soon as the reply
-/// is judged (`ping::Reader`): a cache that answers and keeps the connection
-/// open is not left to the deadline.
-pub async fn ping_socket(host: &str, port: u16, request: &str) -> (Option<String>, Leak) {
+/// is settled (`ping::Reader::settled`): without a scan, once it is judged,
+/// so a cache that answers and keeps the connection open is not left to the
+/// deadline; with one, also once the urlfile has been read far enough to
+/// tell whether it lists this cache (ADR-0021).
+pub async fn ping_socket(
+    host: &str,
+    port: u16,
+    request: &str,
+    scan: Option<UrlScan>,
+) -> (PingResult, Leak) {
     let mut reader = ping::Reader::new();
-    let mut verdict = None;
+    if let Some(scan) = scan {
+        reader = reader.scanning(scan);
+    }
     let (bytes, leak) = talk(
         host,
         port,
@@ -185,63 +203,194 @@ pub async fn ping_socket(host: &str, port: u16, request: &str) -> (Option<String
         PING_BODY_MAX,
         PING_TIMEOUT_MS,
         |b: &[u8]| {
-            verdict = reader.feed(b);
-            verdict.is_some()
+            reader.feed(b);
+            reader.settled()
         },
     )
     .await;
-    let pong = match (bytes, verdict) {
-        // Settled while reading.
-        (Ok(_), Some(verdict)) => verdict.pong(),
-        // Stopped at the size limit: judge what arrived, the last chunk
-        // included, but never as a closed reply.
-        (Ok(bytes), None) if bytes.len() > PING_BODY_MAX => {
-            reader.feed(&bytes).and_then(ping::Verdict::pong)
-        }
-        // The peer closed: whatever arrived is the whole reply.
-        (Ok(bytes), None) => reader.close(&bytes),
+    // Each arm's pong is the verdict latched at the pong line, when there
+    // is one: `feed`, `close` and `at_deadline` all return it first.
+    let (pong, end) = match bytes {
+        // Stopped at the size limit: `done` never saw the last chunk. Judge
+        // what arrived, that chunk included, but never as a closed reply.
+        Ok(bytes) if bytes.len() > PING_BODY_MAX => (
+            reader.feed(&bytes).and_then(ping::Verdict::pong),
+            ping::End::Cut,
+        ),
+        // Settled while reading. The listing of a settled reader does not
+        // depend on how the read ended; `Cut` claims nothing about it.
+        Ok(_) if reader.settled() => (
+            reader.verdict().and_then(ping::Verdict::pong),
+            ping::End::Cut,
+        ),
+        // The peer closed: whatever arrived is the whole reply, and `close`
+        // hands its last line to the scan.
+        Ok(bytes) => (reader.close(&bytes), ping::End::Closed),
         // The deadline, or the connection failed mid-reply: a body that had
         // reached its Content-Length still counts.
-        (Err(_), _) => reader.at_deadline(),
+        Err(_) => (reader.at_deadline(), ping::End::Deadline),
     };
-    (pong, leak)
+    let listing = reader.listing(end);
+    (PingResult { pong, listing }, leak)
 }
 
-/// Ping a cache with `fetch()`. Redirects are not followed, as over a socket:
-/// each hop would be another subrequest, and a URL that only redirects is
-/// not the cache it names. Reads at most [`PING_BODY_MAX`] bytes of the body
-/// and stops as soon as the reply is judged (`ping::Reader`). The runtime
-/// delimits the body itself, so `Content-Length` is not used: it may count
-/// the compressed bytes of a body the runtime has already decoded.
-pub async fn ping_fetch(url: &str) -> Option<String> {
-    within(PING_TIMEOUT_MS, async {
-        let headers = Headers::new();
-        headers.set("User-Agent", &gwc_core::product_id()).ok()?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Get)
-            .with_headers(headers)
-            .with_redirect(RequestRedirect::Manual);
-        let request = Request::new_with_init(url, &init).ok()?;
+/// How a `fetch()` ping's read stopped.
+enum FetchEnd {
+    /// The reader settled.
+    Settled,
+    /// The body ran past [`PING_BODY_MAX`].
+    Cut,
+    /// The body stream failed.
+    Failed,
+    /// The body stream ended.
+    StreamEnd,
+}
+
+/// A GET for `url` with the product-id User-Agent that does not follow
+/// redirects: each hop would be another subrequest, and a URL that only
+/// redirects is not the cache it names.
+fn get_request(url: &str) -> Option<Request> {
+    let headers = Headers::new();
+    headers.set("User-Agent", &gwc_core::product_id()).ok()?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get)
+        .with_headers(headers)
+        .with_redirect(RequestRedirect::Manual);
+    Request::new_with_init(url, &init).ok()
+}
+
+/// Ping a cache with `fetch()`. Redirects are not followed, as over a socket.
+/// Stops reading once the body is past [`PING_BODY_MAX`] bytes (so at most
+/// one chunk more), or as soon as the reply is settled
+/// (`ping::Reader::settled`; see [`ping_socket`]). The runtime delimits the
+/// body itself, so `Content-Length` is not used: it may count the compressed
+/// bytes of a body the runtime has already decoded.
+///
+/// The reader and the body live outside the deadline, so a deadline after
+/// the pong line still yields that pong, and the scan so far.
+pub async fn ping_fetch(url: &str, scan: Option<UrlScan>) -> PingResult {
+    let mut reader: Option<ping::Reader> = None;
+    let mut body = Vec::new();
+    let stop = within(PING_TIMEOUT_MS, async {
+        let request = get_request(url)?;
         let mut response = Fetch::Request(request).send().await.ok()?;
-        let mut reader = ping::Reader::body(response.status_code());
+        let mut fresh = ping::Reader::body(response.status_code());
+        if let Some(scan) = scan {
+            fresh = fresh.scanning(scan);
+        }
+        let reader = reader.insert(fresh);
         let mut stream = response.stream().ok()?;
-        let mut body = Vec::new();
         loop {
-            if let Some(verdict) = reader.feed(&body) {
-                return verdict.pong();
+            reader.feed(&body);
+            if reader.settled() {
+                return Some(FetchEnd::Settled);
             }
             if body.len() > PING_BODY_MAX {
-                return None;
+                return Some(FetchEnd::Cut);
             }
             match stream.next().await {
                 Some(Ok(chunk)) => body.extend_from_slice(&chunk),
-                Some(Err(_)) => return None,
-                None => return reader.close(&body),
+                Some(Err(_)) => return Some(FetchEnd::Failed),
+                None => return Some(FetchEnd::StreamEnd),
             }
         }
     })
+    .await;
+    let Some(mut reader) = reader else {
+        // No response: no pong, and nothing scanned.
+        return PingResult {
+            pong: None,
+            listing: Listing::Unknown,
+        };
+    };
+    let end = match stop.flatten() {
+        // The stream ended: the body is whole, and `close` hands its last
+        // line to the scan, then judges it if nothing has yet.
+        Some(FetchEnd::StreamEnd) => {
+            let pong = reader.close(&body);
+            let listing = reader.listing(ping::End::StreamEnd);
+            return PingResult { pong, listing };
+        }
+        // A settled reader's listing does not depend on the end.
+        Some(FetchEnd::Settled | FetchEnd::Cut) => ping::End::Cut,
+        // The deadline, the stream failing, or the body stream not opening.
+        Some(FetchEnd::Failed) | None => ping::End::Deadline,
+    };
+    // Only the latched verdict counts here: a body that was still arriving
+    // is no pong, as before the scan.
+    PingResult {
+        pong: reader.verdict().and_then(ping::Verdict::pong),
+        listing: reader.listing(end),
+    }
+}
+
+/// Advertise this cache over a socket: `request` is the plain HTTP/1.0 GET
+/// for the update. Reads at most [`advert::READ_MAX`] bytes in total, headers
+/// included (`talk` may read one chunk more; the excess is not looked at),
+/// and stops once the reply's class is decided ([`advert::ReplyWatch`]). A
+/// timeout, a failed connection or a cut reply is `Failed` unless already
+/// decided.
+pub async fn advertise_socket(host: &str, port: u16, request: &str) -> (Class, Leak) {
+    let mut watch = advert::ReplyWatch::socket();
+    let (bytes, leak) = talk(
+        host,
+        port,
+        request.as_bytes(),
+        advert::READ_MAX,
+        advert::TIMEOUT_MS,
+        |b: &[u8]| {
+            watch.feed(b);
+            watch.decided()
+        },
+    )
+    .await;
+    if let Ok(bytes) = bytes {
+        if bytes.len() > advert::READ_MAX {
+            // Cut at the limit: `done` never saw the last chunk.
+            watch.feed(&bytes[..advert::READ_MAX]);
+        } else {
+            // The peer closed, or `done` returned true: whatever arrived is
+            // the whole reply.
+            watch.close(&bytes);
+        }
+    }
+    (watch.class(), leak)
+}
+
+/// Advertise this cache with `fetch()` to `url`, the update URL. No
+/// redirects, as for pings. Reads the body until the reply's class is
+/// decided ([`advert::ReplyWatch`], at most [`advert::BODY_MAX`] bytes and
+/// one chunk) or the body ends. A timeout, or a failed request or body
+/// stream, is `Failed` unless already decided.
+pub async fn advertise_fetch(url: &str) -> Class {
+    within(advert::TIMEOUT_MS, async {
+        let request = get_request(url)?;
+        let mut response = Fetch::Request(request).send().await.ok()?;
+        let mut watch = advert::ReplyWatch::body(response.status_code());
+        if watch.decided() {
+            return Some(watch.class());
+        }
+        let mut stream = response.stream().ok()?;
+        let mut body = Vec::new();
+        loop {
+            watch.feed(&body);
+            if watch.decided() {
+                break;
+            }
+            match stream.next().await {
+                Some(Ok(chunk)) => body.extend_from_slice(&chunk),
+                Some(Err(_)) => break,
+                None => {
+                    watch.close(&body);
+                    break;
+                }
+            }
+        }
+        Some(watch.class())
+    })
     .await
     .flatten()
+    .unwrap_or(Class::Failed)
 }
 
 async fn write_all(socket: &mut Socket, mut bytes: &[u8]) -> std::io::Result<()> {

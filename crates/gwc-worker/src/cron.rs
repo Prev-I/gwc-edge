@@ -1,6 +1,8 @@
 //! The cron run (every 10 minutes, ADR-0012):
 //! 1. read the hub and cache queues and the cap counters (one batch);
 //! 2. handshake with up to 16 hubs, 5 at a time, then ping up to 2 caches;
+//!    then, with `ADVERTISE=on`, advertise this cache to at most one of them
+//!    whose reply showed it does not list this one (ADR-0021);
 //! 3. apply every result, store new `X-Try-Hubs` candidates, purge old
 //!    `dead` rows, record the caches deleted after failed pings in
 //!    `dead_caches` and expire old records (ADR-0022) (one batch);
@@ -13,6 +15,7 @@
 //! The budget is counted, not timed: every socket, fetch and D1 statement is
 //! one subrequest against `verify::SUBREQUEST_CEILING`.
 
+use gwc_core::advert::{self, UrlScan};
 use gwc_core::config::{Config, Dial};
 use gwc_core::handshake::{Exchange, Verdict};
 use gwc_core::log::d1_error_line;
@@ -43,6 +46,10 @@ const TAIL: u32 = store::APPLY_STATEMENTS + 2 + 1 + 1 + 2 + 3 + 3 + 2;
 // A full run fits the ledger: the queue read, every handshake and ping, and
 // the tail. A statement added to the run without room for it would
 // otherwise skip pings silently (`skipped_budget`).
+//
+// The one exception is the advertisement (ADR-0021, "The advertisement"):
+// its two units (the stamp and the request) are not reserved here, so a
+// full run skips it (`advert_skipped`) and the hubs keep their priority.
 #[allow(clippy::cast_possible_truncation)] // small constants
 const _: () = assert!(
     store::QUEUE_STATEMENTS
@@ -61,6 +68,12 @@ pub async fn run(env: &Env) -> Result<()> {
     let mut ledger = Ledger::new(TAIL);
     let mut run = CronRun {
         test_dial: config.as_ref().is_ok_and(|c| c.test_dial.is_some()),
+        advertise: if config.as_ref().is_ok_and(|c| c.advertise) {
+            "on"
+        } else {
+            "off"
+        }
+        .to_owned(),
         ..CronRun::default()
     };
     let mut leaks = Vec::new();
@@ -72,7 +85,22 @@ pub async fn run(env: &Env) -> Result<()> {
         ledger.spend(store::QUEUE_STATEMENTS);
         let applied = match store::cron_queue(&db, now).await {
             Ok(queue) => {
-                let writes = verify(&queue, now, config, &mut ledger, &mut run, &mut leaks).await;
+                let (writes, candidate) =
+                    verify(&queue, now, config, &mut ledger, &mut run, &mut leaks).await;
+                // The run's last outbound request, before the results batch,
+                // so its counters reach the stored `cron` document.
+                if let Some(candidate) = candidate {
+                    advertise(
+                        &db,
+                        &candidate,
+                        config,
+                        now,
+                        &mut ledger,
+                        &mut run,
+                        &mut leaks,
+                    )
+                    .await;
+                }
                 store::apply_cron(&db, now, &writes)
                     .await
                     .map_err(|e| ("apply_cron", e))
@@ -178,7 +206,16 @@ fn target(config: &Config, key: &str, host: &str, port: u16) -> Option<(String, 
     }
 }
 
-/// Check the picked hubs and ping the due caches; decide every write.
+/// A pinged cache whose reply showed it does not list this one (ADR-0021).
+struct Candidate {
+    url: String,
+    host: String,
+    pong: String,
+}
+
+/// Check the picked hubs and ping the due caches; decide every write. Also
+/// returns the first pinged cache, in queue order, that qualifies for the
+/// advertisement.
 async fn verify(
     queue: &store::CronQueue,
     now: u64,
@@ -186,7 +223,7 @@ async fn verify(
     ledger: &mut Ledger,
     run: &mut CronRun,
     leaks: &mut Vec<dial::PendingClose>,
-) -> CronWrites {
+) -> (CronWrites, Option<Candidate>) {
     let mut writes = CronWrites::default();
     // Room under the live cap. A `dead` hub that passes its check becomes
     // live, so returning hubs are picked only while there is room for them,
@@ -204,12 +241,14 @@ async fn verify(
     writes.candidates =
         verify::candidates(offered, now, usize::try_from(room).unwrap_or(usize::MAX));
     // After the handshakes, so their sockets are closed: 6 connections at most.
+    let mut candidate = None;
     for cache in &queue.caches {
-        if let Some(ping) = ping_cache(cache, config, ledger, run, leaks).await {
+        if let Some((ping, qualifies)) = ping_cache(cache, now, config, ledger, run, leaks).await {
             writes.caches.push(ping);
+            candidate = candidate.or(qualifies);
         }
     }
-    writes
+    (writes, candidate)
 }
 
 /// Handshake with the picked hubs in waves of [`HANDSHAKE_CONCURRENCY`].
@@ -327,15 +366,28 @@ async fn check_hubs(
 }
 
 /// Ping one cache, unless the budget is spent. A `TEST_DIAL` block counts
-/// as a failed ping and costs nothing.
+/// as a failed ping and costs nothing. When the cache is due an
+/// advertisement, the ping scans its urlfile too, and the cache is returned
+/// as a [`Candidate`] if its pong is not Skulls' and its reply, read whole,
+/// does not list this one (ADR-0021).
 async fn ping_cache(
     cache: &store::QueuedCache,
+    now: u64,
     config: &Config,
     ledger: &mut Ledger,
     run: &mut CronRun,
     leaks: &mut Vec<dial::PendingClose>,
-) -> Option<CachePing> {
+) -> Option<(CachePing, Option<Candidate>)> {
     let (host, _, request) = ping::socket_request(&cache.url);
+    let due = advert::due(
+        config.advertise,
+        cache.verified,
+        &cache.host,
+        cache.advertised,
+        &config.canonical_url,
+        now,
+    );
+    let scan = due.then(|| UrlScan::new(&cache.host, &config.canonical_url));
     let dial = config.dial(&host);
     // The ping may use the sixth connection, unless leaked sockets still
     // closing hold every one.
@@ -345,17 +397,25 @@ async fn ping_cache(
         run.skipped_budget += 1;
         return None;
     }
-    let (pong, leak) = match (dial, ping::via(&cache.url)) {
-        (Dial::Blocked, _) => (None, dial::Leak::default()),
+    let (outcome, leak) = match (dial, ping::via(&cache.url)) {
+        (Dial::Blocked, _) => (
+            dial::PingResult {
+                pong: None,
+                listing: ping::Listing::Unknown,
+            },
+            dial::Leak::default(),
+        ),
         // TEST_DIAL: the same method, aimed at the mapped loopback address.
         (Dial::Mapped(a), Via::Fetch(_)) => (
-            dial::ping_fetch(&ping::fetch_url_at(&cache.url, a)).await,
+            dial::ping_fetch(&ping::fetch_url_at(&cache.url, a), scan).await,
             dial::Leak::default(),
         ),
         (Dial::Mapped(a), Via::Socket { .. }) => {
-            dial::ping_socket(&a.ip().to_string(), a.port(), &request).await
+            dial::ping_socket(&a.ip().to_string(), a.port(), &request, scan).await
         }
-        (Dial::Direct, Via::Fetch(url)) => (dial::ping_fetch(&url).await, dial::Leak::default()),
+        (Dial::Direct, Via::Fetch(url)) => {
+            (dial::ping_fetch(&url, scan).await, dial::Leak::default())
+        }
         (
             Dial::Direct,
             Via::Socket {
@@ -363,11 +423,19 @@ async fn ping_cache(
                 port,
                 request,
             },
-        ) => dial::ping_socket(&host, port, &request).await,
+        ) => dial::ping_socket(&host, port, &request, scan).await,
     };
     note_leak(run, leaks, leak);
     run.caches_pinged += 1;
-    let action = verify::after_ping(cache.failures, pong);
+    let candidate = match (&outcome.pong, outcome.listing) {
+        (Some(name), ping::Listing::Absent) if due && !advert::excluded(name) => Some(Candidate {
+            url: cache.url.clone(),
+            host: cache.host.clone(),
+            pong: name.clone(),
+        }),
+        _ => None,
+    };
+    let action = verify::after_ping(cache.failures, outcome.pong);
     let result = match action {
         CacheAction::Verified { .. } => {
             run.caches_verified += 1;
@@ -386,10 +454,85 @@ async fn ping_cache(
         "{}",
         serde_json::json!({"kind": "cron_cache", "url": cache.url, "result": result})
     );
-    Some(CachePing {
-        url: cache.url.clone(),
-        action,
-    })
+    Some((
+        CachePing {
+            url: cache.url.clone(),
+            action,
+        },
+        candidate,
+    ))
+}
+
+/// Advertise this cache to `candidate` (ADR-0021, "The advertisement"):
+/// only with a free connection slot now (no wait) and both ledger units, the
+/// stamp's and the request's; otherwise it is skipped. The stamp comes
+/// first: if it fails, nothing is sent. The reply's class is counted and
+/// logged, never stored.
+async fn advertise(
+    db: &D1Database,
+    candidate: &Candidate,
+    config: &Config,
+    now: u64,
+    ledger: &mut Ledger,
+    run: &mut CronRun,
+    leaks: &mut Vec<dial::PendingClose>,
+) {
+    let (host, _, _) = ping::socket_request(&candidate.url);
+    // A candidate answered its ping, so `TEST_DIAL` did not block it.
+    let at = match config.dial(&host) {
+        Dial::Direct => None,
+        Dial::Mapped(a) => Some(a),
+        Dial::Blocked => {
+            run.advert_skipped += 1;
+            return;
+        }
+    };
+    if verify::slots(HANDSHAKE_CONCURRENCY + 1, open_leaks(leaks)) == 0 || !ledger.try_take_n(2) {
+        run.advert_skipped += 1;
+        return;
+    }
+    // A failed stamp still spends both units, by design: both are checked
+    // together before either is taken.
+    if let Err(e) = store::stamp_advertised(db, &candidate.host, now).await {
+        console_error!("{}", d1_error_line("stamp_advertised", &e.to_string()));
+        run.advert_skipped += 1;
+        return;
+    }
+    let started = Date::now().as_millis();
+    // The way the ping went; with `TEST_DIAL`, aimed at the mapped address.
+    let class = match (at, advert::via(&candidate.url, &config.canonical_url)) {
+        (Some(a), Via::Fetch(url)) => dial::advertise_fetch(&ping::fetch_at(&url, a)).await,
+        (None, Via::Fetch(url)) => dial::advertise_fetch(&url).await,
+        (
+            at,
+            Via::Socket {
+                host,
+                port,
+                request,
+            },
+        ) => {
+            let (host, port) = at.map_or((host, port), |a| (a.ip().to_string(), a.port()));
+            let (class, leak) = dial::advertise_socket(&host, port, &request).await;
+            note_leak(run, leaks, leak);
+            class
+        }
+    };
+    run.caches_advertised += 1;
+    match class {
+        advert::Class::Ok => run.adverts_ok += 1,
+        advert::Class::Warned => run.adverts_warned += 1,
+        advert::Class::Failed => run.adverts_failed += 1,
+    }
+    console_log!(
+        "{}",
+        serde_json::json!({
+            "kind": "cron_advert",
+            "url": candidate.url,
+            "pong": candidate.pong,
+            "class": class.as_str(),
+            "ms": Date::now().as_millis().saturating_sub(started),
+        })
+    );
 }
 
 /// Count a socket whose close timed out, and keep its close for
@@ -528,6 +671,12 @@ fn log_run(snap: &Snapshot, now: u64, summary: &CronSummary, stats_rendered: boo
         "verification_failed": r.verification_failed,
         "subrequests": r.subrequests,
         "test_dial": r.test_dial,
+        "advertise": r.advertise,
+        "caches_advertised": r.caches_advertised,
+        "adverts_ok": r.adverts_ok,
+        "adverts_warned": r.adverts_warned,
+        "adverts_failed": r.adverts_failed,
+        "advert_skipped": r.advert_skipped,
         "ms": r.last_run_ms,
         "hubs_served": snap.live_hubs(now),
         "caches": snap.caches.len(),

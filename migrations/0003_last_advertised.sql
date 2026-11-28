@@ -1,0 +1,11 @@
+-- Migration number: 0003  last advertised (ADR-0021)
+--
+-- When the cron last advertised this cache to the verified cache on this
+-- row's host, in seconds since the epoch; NULL if never. The cron reads the
+-- newest value across a host's rows and stamps every row of the host, so the
+-- interval (gwc_core::advert::INTERVAL) applies per host. Written by the
+-- cron only, at most 3 rows per advertisement (the per-host cap). No index:
+-- caches_host already serves the per-host lookup, and a new one would cost a
+-- written row on every stamp.
+-- The bound mirrors the other timestamp columns: never negative.
+ALTER TABLE caches ADD COLUMN last_advertised INTEGER CHECK (last_advertised IS NULL OR last_advertised >= 0);

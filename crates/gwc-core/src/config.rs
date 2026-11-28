@@ -24,6 +24,9 @@ pub struct Config {
     pub denylist: Vec<String>,
     /// `GWC_TRACE=1`: the cron logs each hub's reply headers.
     pub trace: bool,
+    /// `ADVERTISE=on` (ADR-0021): the cron may advertise this cache to
+    /// verified caches. Off unless the value is exactly `on`.
+    pub advertise: bool,
     /// `TEST_DIAL`, integration tests only (ADR-0012): where the cron dials
     /// instead of each hub IP or cache host. Loopback only; when set, a
     /// target it does not map is not dialled at all.
@@ -76,6 +79,7 @@ impl Config {
     /// | `URLFILE_COUNT` | 20, clamped to 1..=50 |
     /// | `CLIENT_DENYLIST` | `CRUX` |
     /// | `GWC_TRACE` | off; `1` turns it on |
+    /// | `ADVERTISE` | off; `on` turns it on |
     /// | `TEST_DIAL` | unset; `target=127.x.y.z:port,...` (tests only) |
     ///
     /// # Errors
@@ -100,6 +104,7 @@ impl Config {
                 |v| parse_denylist(&v),
             ),
             trace: var("GWC_TRACE").is_some_and(|v| v.trim() == "1"),
+            advertise: var("ADVERTISE").is_some_and(|v| v.trim() == "on"),
             test_dial: var("TEST_DIAL")
                 .filter(|v| !v.trim().is_empty())
                 .map(|v| parse_test_dial(&v))
@@ -256,6 +261,37 @@ mod tests {
             assert!(
                 !cfg.contains("\"TEST_DIAL\""),
                 "TEST_DIAL is for tests only"
+            );
+        }
+    }
+
+    #[test]
+    fn advertise_is_on_only_for_on() {
+        let base = ("CANONICAL_URL", "http://gwc.example.org/");
+        assert!(!Config::from_vars(vars(&[base])).unwrap().advertise);
+        for (v, want) in [
+            ("on", true),
+            (" on ", true),
+            ("ON", false),
+            ("yes", false),
+            ("on-including-skulls", false),
+            ("1", false),
+        ] {
+            let c = Config::from_vars(vars(&[base, ("ADVERTISE", v)])).unwrap();
+            assert_eq!(c.advertise, want, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn the_shipped_wrangler_config_does_not_advertise() {
+        assert!(include_str!("../../../wrangler.jsonc").contains("\"ADVERTISE\": \"off\""));
+        for cfg in [
+            include_str!("../../../wrangler.jsonc"),
+            include_str!("../../../wrangler.no-d1.jsonc"),
+        ] {
+            assert!(
+                !cfg.contains("\"ADVERTISE\": \"on\""),
+                "a shipped config must not advertise"
             );
         }
     }

@@ -346,6 +346,16 @@ impl Ledger {
         true
     }
 
+    /// Record `n` optional subrequests if the budget allows all of them;
+    /// otherwise record none.
+    pub fn try_take_n(&mut self, n: u32) -> bool {
+        if self.used.saturating_add(self.tail).saturating_add(n) > SUBREQUEST_CEILING {
+            return false;
+        }
+        self.used += n;
+        true
+    }
+
     #[must_use]
     pub fn used(&self) -> u32 {
         self.used
@@ -355,6 +365,18 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_take_n_takes_all_or_none() {
+        let mut l = Ledger::new(23);
+        l.spend(21);
+        assert!(!l.try_take_n(2));
+        assert_eq!(l.used(), 21);
+        let mut l = Ledger::new(23);
+        l.spend(20);
+        assert!(l.try_take_n(2));
+        assert_eq!(l.used(), 22);
+    }
 
     const NOW: u64 = 1_792_744_200;
 

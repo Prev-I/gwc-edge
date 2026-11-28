@@ -542,6 +542,20 @@ A Shareaza hub accepting an incoming connection (`SN:636-702`, `SN:925-1257`):
   `failed` (not served, pinged again after an hour); three in a row delete it,
   and the URL is then declined for 48 hours (ADR-0022).
   A verified cache is pinged again every 6 hours. At most 2 pings a run.
+- **Advertisement** (ADR-0021, off unless `ADVERTISE=on`): when a verified
+  cache is due (not this cache, and not advertised to within 30 days), its
+  ping also reads the urlfile past the pong, line by line (`u|<url>|...`),
+  until the body ends, or until it stops early: once both the pong and this
+  cache's own line were seen, at a `Content-Length` reached, or at a pong
+  starting with `Skulls`. If the body was read whole, lists a cache other than
+  the peer, and not this one, and the pong does not start with `Skulls`, the
+  cron may send that cache `GET <url>?update=1&url=<this
+  cache>&net=gnutella2&cache=1&client=TEST&version=<product id>`, with a 20 s
+  deadline; at most one advertisement a run, over all caches. The reply is
+  classified by its first body line containing `OK` (`warned` if `WARNING`
+  is on it); any other reply or status is `failed`.
+  The class is logged and counted, never stored. The attempt is stamped in
+  `caches.last_advertised` first, so a failed send is not retried for 30 days.
 
 ## What gwc-edge stores
 

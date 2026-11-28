@@ -10,7 +10,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 nightly="$(grep -o 'nightly-[0-9-]*' mise.toml | head -1)"
-all=(query handshake cache_url ping_reply)
+all=(query handshake cache_url ping_reply advert_reply)
 cd fuzz
 
 case "${1:-}" in

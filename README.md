@@ -50,7 +50,8 @@ a GitHub account.
    fork until you do.
 3. **Choose the canonical URL** ([step 1 of Deploying](#1-choose-the-canonical-url)).
 4. **Create the `production` environment** with its two secrets, and the
-   **repository** variable `GWC_CANONICAL_URL`
+   **repository** variable `GWC_CANONICAL_URL` (and, optionally,
+   `GWC_ADVERTISE`, see `docs/operations.md`, "Turning advertising on")
    ([Deploy from GitHub](#4-deploy-from-github-optional)). Not an environment
    variable: `prod-smoke` runs outside the environment and would skip.
    GitHub Free allows environments on public repositories, which a fork of
@@ -201,7 +202,10 @@ In the repository settings:
 
 3. **Add a repository variable** (Settings → Secrets and variables →
    Variables): `GWC_CANONICAL_URL`, the canonical URL from step 1. The
-   `prod-smoke` workflow reads it too.
+   `prod-smoke` workflow reads it too. Optionally `GWC_ADVERTISE`: `on`
+   lets the cron advertise this cache to verified caches that do not list
+   it (ADR-0021); unset, or `off`, is the default. Any other value fails the
+   deploy.
 
 `.github/workflows/prod-smoke.yml` runs `smoke.sh --prod` every day. When it
 fails it opens an issue labelled `prod-smoke` (Issues must be enabled), or
@@ -214,7 +218,8 @@ happens.
 ### 5. After deploying
 
 These signs say the cache is healthy (`docs/operations.md`):
-- `/healthz` reports `"status":"ok"`, `"cron":"ok"` and `"test_dial":false`;
+- `/healthz` reports `"status":"ok"`, `"cron":"ok"` and `"test_dial":false`,
+  and `"advertise"` as `on` or `off`, as you set `GWC_ADVERTISE`;
 - `/stats` shows the cron's last run and the request counts;
 - the Workers Logs show one JSON line per request, plus one line per cron
   run.
