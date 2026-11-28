@@ -34,11 +34,13 @@ pub fn due(
         && advertised.is_none_or(|t| now >= t && now - t >= INTERVAL)
 }
 
-/// Whether the cache that answered with this pong name is never advertised
-/// to: Skulls (ADR-0021).
+/// Whether the cache whose pong name starts with `Skulls`, in any case, is
+/// never advertised to (ADR-0021).
 #[must_use]
 pub fn excluded(pong: &str) -> bool {
-    pong.to_ascii_lowercase().contains("skulls")
+    pong.as_bytes()
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"skulls"))
 }
 
 /// Scans a peer's urlfile, one line at a time, for this cache.
@@ -201,6 +203,9 @@ mod tests {
         assert!(excluded("SKULLS"));
         assert!(!excluded("Beacon Cache II 0.8.0.1"));
         assert!(!excluded("Cachechu 1.6"));
+        assert!(!excluded("NotSkulls 1.0"));
+        assert!(!excluded("Beacon Cache II (skulls-compatible)"));
+        assert!(!excluded("Skul"));
     }
 
     #[test]
