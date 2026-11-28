@@ -9,7 +9,8 @@ name: deploy
 #   variable  GWC_CANONICAL_URL   the cache's public http:// URL
 #   variable  GWC_ADVERTISE       optional: on advertises this cache to
 #             verified caches (ADR-0021); unset means off
-# Until all three are set, the job only says so and succeeds.
+# Until the two secrets and GWC_CANONICAL_URL are set, the job only says so
+# and succeeds.
 
 on:
   workflow_run:

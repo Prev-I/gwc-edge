@@ -110,7 +110,9 @@ every push to `main`, and when started by hand (ADR-0025).
   (`scripts/wasm-size.sh`) all the same. The cron
   counts every socket, fetch and D1 statement against a ledger
   (`gwc_core::verify::Ledger`, ceiling 45); a new statement in the cron's
-  path must be added to `cron::TAIL` or `store::*_STATEMENTS` (ADR-0012).
+  path must be added to `cron::TAIL` or `store::*_STATEMENTS` (ADR-0012),
+  except the ADR-0021 advertisement (the stamp and the request), which
+  takes only free ledger units and is not reserved.
 - **Only the cron changes a hub's status to listed or `dead`, writes
   `last_checked`, or resets `failures`**; no request deletes a row
   (ADR-0012).

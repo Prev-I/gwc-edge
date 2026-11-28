@@ -66,7 +66,11 @@ No line carries the requester's address.
   `verification_failed` (the verification's D1 work failed: see the
   `d1_error` line; nothing it decided was stored), `subrequests`
   (counted against the run's ceiling of 45), `test_dial`, `ms`,
-  `hubs_served`, `caches`, `stats_rendered`.
+  `hubs_served`, `caches`, `stats_rendered`, and, from ADR-0021,
+  `advertise` (`on` or `off`), `caches_advertised` (at most one a run),
+  `adverts_ok`, `adverts_warned`, `adverts_failed` (how each reply was
+  classified) and `advert_skipped` (a cache qualified but the ledger, the
+  connection slots or the stamp had no room: apart from `skipped_budget`).
 - `{"kind":"cron_hub",…}`: one per hub checked: `ip`, `port`, `class` (`new`,
   `recheck`, `returning`, `candidate`), `was` (status before), `result` (the
   reply's status code, or `unreachable`, `timeout`, `closed`, `invalid`,
@@ -79,6 +83,11 @@ No line carries the requester's address.
   `dead_caches`, and its submissions and seeds are declined for 48 hours
   (`url:dead`, ADR-0022). To lift that early:
   `DELETE FROM dead_caches WHERE url = '…'` (matched case-insensitively).
+- `{"kind":"cron_advert",…}`: one per advertisement sent (ADR-0021): `url`
+  (the cache it was sent to), `pong` (its pong name), `class` (`ok`,
+  `warned`, `failed`: the reply's first line containing `OK`, with
+  `WARNING` on it, or anything else) and `ms`. The class is logged, never
+  stored.
 - `{"kind":"cron_leaks",…}`: after the `cron` line of a run that completes
   with leaked sockets (ADR-0019): `leaked`, `settled`, `open_ms` (for each
   close that completed, how long its connection stayed open, from the
@@ -102,7 +111,7 @@ invocation log.
 | `hubs.unverified`, `dead` | All hubs with that status, whatever their age. |
 | `hubs.total` | Every row in `hubs`, expired ones included. |
 | `caches.*` | Rows in `caches` by status. |
-| `cron` | The last cron run: `last_run_at` and `last_run_ms`, then the fields of the `cron` log line (ADR-0012) except `ms` (here `last_run_ms`), `hubs_served`, `caches` and `stats_rendered`. `test_dial: true` means an integration-test configuration. |
+| `cron` | The last cron run: `last_run_at` and `last_run_ms`, then the fields of the `cron` log line (ADR-0012) except `ms` (here `last_run_ms`), `hubs_served`, `caches` and `stats_rendered`; they include the ADR-0021 fields `advertise`, `caches_advertised`, `adverts_ok`, `adverts_warned`, `adverts_failed` and `advert_skipped`. `test_dial: true` means an integration-test configuration. |
 | `requests` | The last 24 h, estimated from 1-in-8 sampling (`sample_rate`). |
 | `health.d1_errors_24h` | D1 calls that failed. |
 | `health.degraded_responses_24h` | Replies that were not the full reply: a D1 failure, a copy remembered after one, a configuration or internal error. |
@@ -156,6 +165,18 @@ only loopback test peers, so every real check fails (ADR-0012). `cron` is:
 | `never_run` | Requests were served but no cron run has completed: check the trigger. |
 | `stalled` | The last completed cron run is over 30 minutes old (three missed runs). |
 | `ok` | Running. |
+
+`advertise` is `on` or `off`: the effective `ADVERTISE` mode (ADR-0021).
+
+### Turning advertising on
+
+Advertising is off by default. To turn it on, set the repository variable
+`GWC_ADVERTISE` to `on` and deploy; check that `/healthz` then reports
+`"advertise":"on"`. To turn it off, set the variable to `off` or delete it,
+and deploy. Each run then advertises this cache to at most one verified cache
+whose urlfile reply, read whole, lists other caches but not this one, at most
+once in 30 days per host, never to a cache whose pong starts with Skulls
+(ADR-0021). Watch `cron_advert` lines and the `adverts_*` fields of `/stats`.
 
 ## Expected failure modes
 
@@ -338,7 +359,9 @@ own run deploys it.
 **Deploy fails.** The `deploy` workflow stops at the first failing step of
 `scripts/deploy.sh`.
 - At `render-config`: `GWC_CANONICAL_URL` is not a lowercase `http://` URL
-  on a DNS name, port 80, ending in a path.
+  on a DNS name, port 80, ending in a path; or `GWC_ADVERTISE` is anything
+  but exactly `off` or `on` (the renderer does not trim it; unset or empty
+  means `off`).
 - At `d1 create` or `migrations apply`: the API token lacks D1 Edit, or the
   account is over its database quota.
 - At `deploy`: the token lacks Workers Scripts Edit or the zone permissions

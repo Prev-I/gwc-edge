@@ -1,10 +1,11 @@
 # ADR-0021: The cron advertises this cache to the caches it verifies
 
-**Status:** proposed, 2026-10-26; revisited 2026-11-14; revised 2026-11-28,
-after a review and an expert review: advertise only where this cache is
-shown to be missing, behind a deployment flag that is off by default, never
-to Skulls. Would amend ADR-0012 ("Caches", "Budget"), ADR-0015 (what the
-render adds) and ADR-0023 (Consequences: the cron's cost).
+**Status:** accepted, 2026-11-28 (pull request #47). Proposed 2026-10-26;
+revisited 2026-11-14; revised 2026-11-28, after a review and an expert
+review: advertise only where this cache is shown to be missing, behind a
+deployment flag that is off by default, never to Skulls. Amends ADR-0012
+("Caches", "Budget"), ADR-0015 (what the render adds) and ADR-0023
+(Consequences: the cron's cost).
 
 ## Context
 Other GWebCaches learn about this one in only two ways today:
