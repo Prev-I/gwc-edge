@@ -130,7 +130,7 @@ await_health() {
 # --test-scheduled exposes /cdn-cgi/local/scheduled, to run the cron on demand.
 start_worker() {
   wrangler dev --port "$port" --ip 127.0.0.1 --persist-to "$state" --test-scheduled \
-    --var "CANONICAL_URL:$self_url" --var "TEST_DIAL:$test_dial" >>"$log" 2>&1 &
+    --var "CANONICAL_URL:$self_url" --var "TEST_DIAL:$test_dial" --var "ADVERTISE:on" >>"$log" 2>&1 &
   pid=$!
   await_health "$base" 200 "$pid"
 }
@@ -185,6 +185,7 @@ health="$(curl "${curl_opts[@]}" "${base}healthz")" || fail "healthz request fai
 grep -q '"stats":' <<<"$health" || fail "cron did not render stats: $health"
 grep -q '"cron":"ok"' <<<"$health" || fail "cron heartbeat missing: $health"
 grep -q '"test_dial":true' <<<"$health" || fail "healthz does not report TEST_DIAL: $health"
+grep -q '"advertise":"on"' <<<"$health" || fail "healthz does not report ADVERTISE: $health"
 kill -0 "$fake_pid" 2>/dev/null || fail "fake_peer is not running"
 grep -q '"event":"cron_failed"' "$log" && fail "cron logged a failure"
 grep -q '"verification_failed":true' "$log" && fail "the cron's verification failed"

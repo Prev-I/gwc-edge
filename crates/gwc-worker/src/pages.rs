@@ -193,6 +193,8 @@ struct Health {
     /// `TEST_DIAL` is set: an integration-test configuration, which must
     /// never reach production (ADR-0012).
     test_dial: bool,
+    /// `ADVERTISE` (ADR-0021): `"on"` or `"off"`.
+    advertise: &'static str,
     cron: &'static str,
     /// Seconds since each snapshot was rendered.
     snapshot_age: BTreeMap<String, u64>,
@@ -246,6 +248,11 @@ pub async fn healthz(
         database,
         config: config_status,
         test_dial: config.is_ok_and(|c| c.test_dial.is_some()),
+        advertise: if config.is_ok_and(|c| c.advertise) {
+            "on"
+        } else {
+            "off"
+        },
         cron,
         snapshot_age,
     };

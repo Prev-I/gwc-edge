@@ -12,6 +12,8 @@
 #        GWC_CANONICAL_URL=... scripts/deploy.sh --dry-run   (render and bundle only)
 # Any other argument is refused, so a mistyped --dry-run never deploys.
 # Env:   GWC_CANONICAL_URL      required: the URL clients will store
+#        GWC_ADVERTISE         optional: on lets the cron advertise this cache
+#                               to verified caches (ADR-0021); default off
 #        CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
 #                               in CI; locally, `wrangler login` works too
 #        GWC_SKIP_SMOKE=1       skip step 4
@@ -35,7 +37,8 @@ name="$(d1_name)"
 render() {
   rm -f "$out"
   node scripts/render-config.mjs wrangler.jsonc "$out" \
-    --canonical-url "$canonical" --database-id "$1"
+    --canonical-url "$canonical" --database-id "$1" \
+    --advertise "${GWC_ADVERTISE:-off}"
   [ -s "$out" ] || { echo "deploy: $out was not rendered" >&2; exit 1; }
 }
 

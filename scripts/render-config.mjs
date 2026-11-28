@@ -123,13 +123,16 @@ export function canonicalHost(url) {
   return host;
 }
 
-export function render(template, { canonicalUrl, databaseId }) {
+export function render(template, { canonicalUrl, databaseId, advertise = "off" }) {
   const config = JSON.parse(stripJsonc(template));
   const host = canonicalHost(canonicalUrl);
   if (!/^[0-9a-f-]{36}$/.test(databaseId)) {
     throw new Error(`not a D1 database id: ${databaseId}`);
   }
-  config.vars = { ...config.vars, CANONICAL_URL: canonicalUrl };
+  if (advertise !== "off" && advertise !== "on") {
+    throw new Error(`advertise must be off or on: ${advertise}`);
+  }
+  config.vars = { ...config.vars, CANONICAL_URL: canonicalUrl, ADVERTISE: advertise };
   const db = config.d1_databases?.find((d) => d.binding === "DB");
   if (!db) throw new Error("no D1 binding named DB");
   db.database_id = databaseId;
@@ -146,9 +149,12 @@ function main(argv) {
     if (i < 0 || !rest[i + 1]) throw new Error(`missing ${name}`);
     return rest[i + 1];
   };
+  // Optional, unlike the others: absent means off.
+  const adv = rest.indexOf("--advertise");
   const text = render(readFileSync(input, "utf8"), {
     canonicalUrl: opt("--canonical-url"),
     databaseId: opt("--database-id"),
+    ...(adv >= 0 ? { advertise: opt("--advertise") } : {}),
   });
   writeFileSync(output, text);
 }

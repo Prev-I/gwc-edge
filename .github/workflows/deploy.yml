@@ -7,6 +7,8 @@ name: deploy
 #             environment, limited to the main branch (README, "Deploy from
 #             GitHub"), so no other branch's workflow can read them
 #   variable  GWC_CANONICAL_URL   the cache's public http:// URL
+#   variable  GWC_ADVERTISE       optional: on advertises this cache to
+#             verified caches (ADR-0021); unset means off
 # Until all three are set, the job only says so and succeeds.
 
 on:
@@ -45,6 +47,7 @@ jobs:
     timeout-minutes: 30
     env:
       GWC_CANONICAL_URL: ${{ vars.GWC_CANONICAL_URL }}
+      GWC_ADVERTISE: ${{ vars.GWC_ADVERTISE }}
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       # The secrets reach only this step and the deploy step, not the tool
