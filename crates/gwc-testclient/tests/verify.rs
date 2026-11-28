@@ -67,7 +67,7 @@ fn state_dir() -> String {
 }
 
 /// Age the caches' `last_checked` past the 6 h recheck, so the next cron
-/// runs ping them.
+/// runs ping them. Interpolates SQL: only literal test URLs.
 fn make_due(urls: &[&str]) {
     let past = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -85,7 +85,8 @@ fn make_due(urls: &[&str]) {
     );
 }
 
-/// `caches.last_advertised` of the row with this URL.
+/// `caches.last_advertised` of the row with this URL. Interpolates SQL:
+/// only literal test URLs.
 fn last_advertised(url: &str) -> Option<u64> {
     let rows = gwc_testclient::d1::query(
         &state_dir(),

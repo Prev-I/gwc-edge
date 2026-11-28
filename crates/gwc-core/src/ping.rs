@@ -203,8 +203,8 @@ pub struct Reader {
     line_start: usize,
     scanned: usize,
     verdict: Option<Verdict>,
-    /// The verdict if nothing more arrives: a body that has reached its
-    /// `Content-Length` with nothing after it yet.
+    /// The verdict if nothing more arrives: set once the body has reached
+    /// its `Content-Length` (see `reached`) with nothing after it yet.
     provisional: Option<Verdict>,
     /// Bytes looked at so far, header search and line parsing included: the
     /// measure of the work done, which stays linear in the reply's length.

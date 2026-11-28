@@ -349,7 +349,8 @@ pub async fn advertise_socket(host: &str, port: u16, request: &str) -> (Class, L
             // Cut at the limit: `done` never saw the last chunk.
             watch.feed(&bytes[..advert::READ_MAX]);
         } else {
-            // The peer closed: whatever arrived is the whole reply.
+            // The peer closed, or `done` returned true: whatever arrived is
+            // the whole reply.
             watch.close(&bytes);
         }
     }

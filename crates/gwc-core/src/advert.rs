@@ -158,7 +158,8 @@ pub fn classify(status: Option<u16>, body: &[u8]) -> Class {
 ///
 /// The class is the one [`classify`] gives the first [`BODY_MAX`] body bytes
 /// of the complete reply. It is decided at once by a status line that is not
-/// HTTP/1.x or a status other than 200; otherwise by the first complete body
+/// HTTP/1.x (at once), or by a status other than 200 (once the header block
+/// has ended); otherwise by the first complete body
 /// line containing `OK`, or once the body reaches [`BODY_MAX`] bytes or its
 /// `Content-Length` (the last line then counts as complete), or by
 /// [`ReplyWatch::close`]. Undecided, it is `Failed`: a timeout or a cut read

@@ -491,6 +491,8 @@ async fn advertise(
         run.advert_skipped += 1;
         return;
     }
+    // A failed stamp still spends both units, by design: both are checked
+    // together before either is taken.
     if let Err(e) = store::stamp_advertised(db, &candidate.host, now).await {
         console_error!("{}", d1_error_line("stamp_advertised", &e.to_string()));
         run.advert_skipped += 1;
