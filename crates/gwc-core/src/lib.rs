@@ -9,6 +9,7 @@
 //! `f24b0ce3753067e02fb6ee7dbf82d8c214c291d2`, under `shareaza/`.
 
 pub mod addr;
+pub mod advert;
 pub mod cache_url;
 pub mod config;
 pub mod counters;

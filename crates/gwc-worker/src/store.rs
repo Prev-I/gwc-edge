@@ -143,6 +143,19 @@ pub async fn write_back_snapshot(
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
+/// Record that the cache on `host` was advertised to at `now`: stamps every
+/// row of the host, so the newest value is the host's (ADR-0021). Writes at
+/// most 3 rows (the per-host cap), each in place.
+// Called by the cron from a later task of ADR-0021.
+#[allow(dead_code)]
+pub async fn stamp_advertised(db: &D1Database, host: &str, now: u64) -> Result<()> {
+    db.prepare("UPDATE caches SET last_advertised = ?2 WHERE host = ?1")
+        .bind(&[host.into(), num(now)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
 /// The two documents `/stats` and the landing page are built from, `stats`
 /// and `cron`, in one query. Reads at most 2 rows.
 pub async fn read_stats_parts(db: &D1Database) -> Result<(Option<String>, Option<String>)> {
@@ -644,9 +657,16 @@ pub struct QueuedHub {
 
 /// A cache the cron may ping.
 #[derive(Debug, Clone)]
+// ADR-0021 fields: the cron reads them from a later task of that change.
+#[allow(dead_code)]
 pub struct QueuedCache {
     pub url: String,
     pub failures: u64,
+    /// Whether the cache's status is `verified`.
+    pub verified: bool,
+    pub host: String,
+    /// The newest `last_advertised` among the rows of this host (ADR-0021).
+    pub advertised: Option<u64>,
 }
 
 /// What the cron reads before dialling.
@@ -690,7 +710,9 @@ fn queue_sql() -> (String, String) {
     .join(" UNION ALL ")
         + " ORDER BY class, k";
     let caches = format!(
-        "SELECT url, failures FROM caches \
+        "SELECT url, failures, status, host, \
+         (SELECT MAX(h.last_advertised) FROM caches AS h WHERE h.host = caches.host) AS advertised \
+         FROM caches \
          WHERE status = 'pending' \
          OR (status = 'failed' AND COALESCE(last_checked, 0) <= ?1 - {CACHE_RETRY}) \
          OR (status = 'verified' AND COALESCE(last_checked, 0) <= ?1 - {CACHE_RECHECK}) \
@@ -729,6 +751,9 @@ pub async fn cron_queue(db: &D1Database, now: u64) -> Result<CronQueue> {
     struct C {
         url: String,
         failures: f64,
+        status: String,
+        host: String,
+        advertised: Option<f64>,
     }
     #[derive(Deserialize)]
     struct N {
@@ -769,6 +794,12 @@ pub async fn cron_queue(db: &D1Database, now: u64) -> Result<CronQueue> {
         Some(QueuedCache {
             url: c.url,
             failures: int(c.failures)?,
+            verified: c.status == "verified",
+            host: c.host,
+            advertised: match c.advertised {
+                Some(a) => Some(int(a)?),
+                None => None,
+            },
         })
     })?;
 
